@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
-from fastapi import FastAPI, Request, Form
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Request, Form, UploadFile, File
+from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from ultralytics import YOLO
 import uvicorn
 import os
 import glob
+import shutil
 from PIL import Image
 from datetime import datetime
 import time
@@ -170,6 +171,7 @@ async def pagina_principal():
         .btn-bravo { background: #770000; color: white; }
         .btn-arquivar { background: #1a4466; color: white; }
         .btn-proximo { background: #225533; color: white; }
+        .btn-upload { background: #2266aa; color: white; }
         .btn-comunicado { background: #443366; color: white; }
         
         .caixa-comunicado { height: 100px; background: #0a0a12; border: 1px solid #252545; border-radius: 5px; padding: 8px; margin-bottom: 8px; overflow-y: auto; font-size: 12px; }
@@ -229,6 +231,10 @@ async def pagina_principal():
                         <button class="btn btn-bravo" onclick="abrirModalUnidades()">🚨 ENVIAR AO BRAVO</button>
                         <button class="btn btn-arquivar" onclick="arquivar()">📁 ARQUIVAR OCORRÊNCIA</button>
                         <button class="btn btn-proximo" onclick="forcarProximaImagem()">⏭️ PRÓXIMA IMAGEM</button>
+                        <label class="btn btn-upload" style="display:block; text-align:center; cursor:pointer; margin-bottom:8px;">
+                            📤 CARREGAR IMAGEM
+                            <input type="file" accept="image/*" style="display:none;" onchange="enviarImagem(this)">
+                        </label>
                     </div>
                 </div>
 
@@ -266,7 +272,6 @@ async def pagina_principal():
 
     <script>
         let estadoZoom = false;
-        let contadores = { vermelho: 0, laranja: 0, amarelo: 0, normal: 0, seguro: 0 };
         
         function atualizarRelogio() {
             const agora = new Date();
@@ -298,6 +303,7 @@ async def pagina_principal():
             document.getElementById('modalUnidades').classList.add('modal-aberto');
         }
         
+        function fecharModalUnidades
         function fecharModalUnidades() {
             document.getElementById('modalUnidades').classList.remove('modal-aberto');
         }
@@ -311,84 +317,97 @@ async def pagina_principal():
             alert(`✅ Ocorrência enviada para: ${unidade}`);
         }
         
-               function arquivar() {
+        function arquivar() {
             alert("✅ Ocorrência arquivada");
         }
-
-    
-    async function forcarProximaImagem() {
-        const res = await fetch('/analisar-proxima', { method: 'POST' });
-        const dados = await res.json();
-        if (dados.status === 'sucesso') {
-            atualizarTela(dados.ocorrencia);
-        }
-    }
-    
-    async function carregarDados() {
-        const res = await fetch('/status');
-        const dados = await res.json();
-        document.getElementById('qtdImagens').textContent = dados.total_imagens;
-        document.getElementById('qtdVermelho').textContent = dados.historico.filter(h => h.nivel === 'vermelho').length;
-        document.getElementById('qtdLaranja').textContent = dados.historico.filter(h => h.nivel === 'laranja').length;
-        document.getElementById('qtdSeguro').textContent = dados.historico.filter(h => h.nivel === 'seguro').length;
-        if (dados.atual) atualizarTela(dados.atual);
-        atualizarRelatorio(dados.historico);
-    }
-    
-    function atualizarTela(ocorrencia) {
-        const tela = document.getElementById('telaImagem');
-        const alerta = document.getElementById('caixaAlerta');
         
-        if (!ocorrencia) {
-            tela.innerHTML = '<span>Aguardando imagem...</span>';
-            alerta.className = 'caixa-alerta alerta-seguro';
-            alerta.innerHTML = '<strong>Aguardando análise...</strong>';
-            return;
+        async function enviarImagem(input) {
+            if (!input.files.length) return;
+            const arquivo = input.files[0];
+            const formData = new FormData();
+            formData.append("arquivo", arquivo);
+            const res = await fetch("/upload-imagem", {
+                method: "POST",
+                body: formData
+            });
+            const dados = await res.json();
+            alert(dados.mensagem);
+            carregarDados();
         }
         
-        tela.innerHTML = `<img src="/imagens/${encodeURIComponent(ocorrencia.imagem)}" alt="Imagem">`;
-        alerta.className = `caixa-alerta alerta-${ocorrencia.nivel}`;
-        alerta.innerHTML = `
-            <strong>${ocorrencia.tipo}</strong>
-            <div>📄 Arquivo: ${ocorrencia.imagem}</div>
-            <div>⏰ Hora: ${ocorrencia.hora}</div>
-            <div>🔍 Detecção: ${ocorrencia.detalhe}</div>
-        `;
-    }
-    
-    function atualizarRelatorio(historico) {
-        const el = document.getElementById('relatorio');
-        if (!historico.length) {
-            el.innerHTML = '<div class="sem-dados">Aguardando primeira análise...</div>';
-            return;
+        async function forcarProximaImagem() {
+            const res = await fetch('/analisar-proxima', { method: 'POST' });
+            const dados = await res.json();
+            if (dados.status === 'sucesso') {
+                atualizarTela(dados.ocorrencia);
+            }
         }
-        el.innerHTML = historico.map(h => `
-            <div class="linha-relatorio">
-                <strong>${h.tipo}</strong> — ${h.imagem} — ${h.hora}
-            </div>
-        `).join('');
-    }
-    
-    async function enviarComunicado() {
-        const input = document.getElementById('entradaMensagem');
-        const texto = input.value.trim();
-        if (!texto) return;
         
-        const caixa = document.getElementById('caixaComunicacao');
-        caixa.innerHTML += `<div class="msg-alfa">ALFA: ${texto}</div>`;
-        input.value = '';
+        async function carregarDados() {
+            const res = await fetch('/status');
+            const dados = await res.json();
+            document.getElementById('qtdImagens').textContent = dados.total_imagens;
+            document.getElementById('qtdVermelho').textContent = dados.historico.filter(h => h.nivel === 'vermelho').length;
+            document.getElementById('qtdLaranja').textContent = dados.historico.filter(h => h.nivel === 'laranja').length;
+            document.getElementById('qtdSeguro').textContent = dados.historico.filter(h => h.nivel === 'seguro').length;
+            if (dados.atual) atualizarTela(dados.atual);
+            atualizarRelatorio(dados.historico);
+        }
         
-        const res = await fetch('/alfa-comunica', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: `mensagem=${encodeURIComponent(texto)}`
-        });
-        const dados = await res.json();
-        caixa.innerHTML += `<div class="msg-guardiao">GUARDIÃO: ${dados.resposta}</div>`;
-        caixa.scrollTop = caixa.scrollHeight;
-    }
-    
-    setInterval(carregarDados, 30000);
+        function atualizarTela(ocorrencia) {
+            const tela = document.getElementById('telaImagem');
+            const alerta = document.getElementById('caixaAlerta');
+            
+            if (!ocorrencia) {
+                tela.innerHTML = '<span>Aguardando imagem...</span>';
+                alerta.className = 'caixa-alerta alerta-seguro';
+                alerta.innerHTML = '<strong>Aguardando análise...</strong>';
+                return;
+            }
+            
+            tela.innerHTML = `<img src="/imagens/${encodeURIComponent(ocorrencia.imagem)}" alt="Imagem">`;
+            alerta.className = `caixa-alerta alerta-${ocorrencia.nivel}`;
+            alerta.innerHTML = `
+                <strong>${ocorrencia.tipo}</strong>
+                <div>📄 Arquivo: ${ocorrencia.imagem}</div>
+                <div>⏰ Hora: ${ocorrencia.hora}</div>
+                <div>🔍 Detecção: ${ocorrencia.detalhe}</div>
+            `;
+        }
+        
+        function atualizarRelatorio(historico) {
+            const el = document.getElementById('relatorio');
+            if (!historico.length) {
+                el.innerHTML = '<div class="sem-dados">Aguardando primeira análise...</div>';
+                return;
+            }
+            el.innerHTML = historico.map(h => `
+                <div class="linha-relatorio">
+                    <strong>${h.tipo}</strong> — ${h.imagem} — ${h.hora}
+                </div>
+            `).join('');
+        }
+        
+        async function enviarComunicado() {
+            const input = document.getElementById('entradaMensagem');
+            const texto = input.value.trim();
+            if (!texto) return;
+            
+            const caixa = document.getElementById('caixaComunicacao');
+            caixa.innerHTML += `<div class="msg-alfa">ALFA: ${texto}</div>`;
+            input.value = '';
+            
+            const res = await fetch('/alfa-comunica', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: `mensagem=${encodeURIComponent(texto)}`
+            });
+            const dados = await res.json();
+            caixa.innerHTML += `<div class="msg-guardiao">GUARDIÃO: ${dados.resposta}</div>`;
+            caixa.scrollTop = caixa.scrollHeight;
+        }
+        
+        setInterval(carregarDados, 30000);
     </script>
 </body>
 </html>
@@ -436,11 +455,18 @@ async def get_comunicacoes():
 
 @app.get("/imagens/{nome_arquivo}")
 async def servir_imagem(nome_arquivo: str):
-    from fastapi.responses import FileResponse
     caminho = os.path.join(PASTA_MONITORADA, nome_arquivo)
     if os.path.exists(caminho):
         return FileResponse(caminho)
     return {"erro": "Arquivo não encontrado"}
+
+@app.post("/upload-imagem")
+async def upload_imagem(arquivo: UploadFile = File(...)):
+    os.makedirs(PASTA_MONITORADA, exist_ok=True)
+    caminho = os.path.join(PASTA_MONITORADA, arquivo.filename)
+    with open(caminho, "wb") as f:
+        shutil.copyfileobj(arquivo.file, f)
+    return {"status": "sucesso", "mensagem": f"Imagem {arquivo.filename} enviada!"}
 
 if __name__ == "__main__":
     print("🚀 GUARDIÃO DF-360 INICIADO")
