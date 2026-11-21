@@ -15,7 +15,7 @@ import time
 app = FastAPI(title="GUARDIÃO DF-360 — VIGILÂNCIA PÚBLICA")
 
 # ================= CONFIGURAÇÕES =================
-PASTA_MONITORADA = "IMAGENS_MONITOR"
+PASTA_MONITORADA = "."
 TEMPO_EXIBICAO = 120  # 2 minutos em segundos
 os.makedirs(PASTA_MONITORADA, exist_ok=True)
 
