@@ -3,9 +3,11 @@ import base64
 import json
 import os
 import random
+import re
 import time
 import uuid
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import requests
@@ -19,7 +21,8 @@ MONITOR_DIR = BASE_DIR / "IMAGENS_MONITOR"
 INTERVALO_SEG = 120
 MODO_DEMO_RETORNO_BRAVO = True
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip()
+GEMINI_MODEL_ENV = os.environ.get("GEMINI_MODEL", "").strip()
+MODELOS_CANDIDATOS = [m for m in [GEMINI_MODEL_ENV, "gemini-2.5-flash", "gemini-2.0-flash"] if m]
 
 app = FastAPI(title="GUARDIAO DF-360 — SSPDF")
 
@@ -54,7 +57,7 @@ STATE = {
         {
             "origem": "GUARDIAO",
             "hora": agora_br().strftime("%H:%M:%S"),
-            "texto": "GUARDIAO DF-360 online na nuvem. Analise visual direta da imagem a cada 2 minutos."
+            "texto": "GUARDIAO DF-360 online na nuvem. Relatorio situacional completo por analise visual direta da imagem."
         }
     ],
     "retorno_bravo": [
@@ -67,114 +70,253 @@ STATE = {
 }
 
 
-def detalhes_ambiente(caminho: Path):
+def preparar_imagem_otimizada(caminho: Path):
     img_w, img_h = 1, 1
     brilho = 128.0
+    contraste = 50.0
     obs_cena = []
+    b64_data = ""
     mime = "image/jpeg"
-
-    if caminho.suffix.lower() == ".png":
-        mime = "image/png"
-    elif caminho.suffix.lower() == ".webp":
-        mime = "image/webp"
 
     try:
         with Image.open(caminho) as im:
             im_rgb = im.convert("RGB")
             img_w, img_h = im_rgb.size
-            brilho = sum(ImageStat.Stat(im_rgb).mean) / 3.0
+            st = ImageStat.Stat(im_rgb)
+            brilho = sum(st.mean) / 3.0
+            contraste = sum(st.stddev) / 3.0
+
             if brilho < 55:
                 obs_cena.append("Baixa luminosidade")
             elif brilho > 215:
                 obs_cena.append("Alta luminosidade")
+            if contraste < 25:
+                obs_cena.append("Baixo contraste")
             if img_w < 300 or img_h < 300:
                 obs_cena.append("Resolucao reduzida")
+
+            # Reduz ate 1024px mantendo nitidez para IA e economizando memoria/banda na nuvem
+            otimizada = im_rgb.copy()
+            otimizada.thumbnail((1024, 1024))
+            buf = BytesIO()
+            otimizada.save(buf, format="JPEG", quality=85, optimize=True)
+            b64_data = base64.b64encode(buf.getvalue()).decode("utf-8")
+            mime = "image/jpeg"
     except Exception as exc:
         obs_cena.append(f"Falha ao inspecionar imagem: {exc}")
+        try:
+            b64_data = base64.b64encode(caminho.read_bytes()).decode("utf-8")
+        except Exception:
+            b64_data = ""
 
     if not obs_cena:
         obs_cena.append("Enquadramento e iluminacao regulares")
 
-    return mime, f"{img_w}x{img_h}px | Brilho {round(brilho, 1)} | " + " | ".join(obs_cena)
+    detalhes = (
+        f"{img_w}x{img_h}px | Brilho {round(brilho, 1)} | "
+        f"Contraste {round(contraste, 1)} | " + " | ".join(obs_cena)
+    )
+    return mime, b64_data, detalhes
+
+
+def extrair_json_robusto(texto: str):
+    if not texto:
+        return None
+    limpo = re.sub(r"```(?:json)?|```", "", texto, flags=re.IGNORECASE).strip()
+    try:
+        obj = json.loads(limpo)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+
+    inicio = limpo.find("{")
+    fim = limpo.rfind("}")
+    if inicio != -1 and fim != -1 and fim > inicio:
+        trecho = limpo[inicio:fim + 1]
+        try:
+            obj = json.loads(trecho)
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            pass
+    return None
+
+
+def consultar_gemini_com_fallback(mime: str, img_b64: str):
+    prompt = (
+        "Voce e um sistema de analise situacional visual para monitoramento operacional (SSPDF / DF-360). "
+        "Analise EXCLUSIVAMENTE o que esta visivel na imagem (ignore completamente o nome do arquivo). "
+        "Avalie presenca de pessoas, atitudes/posturas, armas de fogo, armas brancas, objetos relevantes, "
+        "veiculos/local/ambiente e fatores de risco visiveis. "
+        "Responda APENAS com um JSON valido (sem markdown, sem texto extra fora do JSON) seguindo exatamente este esquema:\n"
+        "{\n"
+        '  "arma_fogo": bool,\n'
+        '  "arma_branca": bool,\n'
+        '  "pessoas_visiveis": int,\n'
+        '  "nivel_sugerido": "NORMAL" | "OBSERVACAO" | "ATENCAO_ELEVADA" | "ALTO_RISCO",\n'
+        '  "objetos": [{"rotulo": "string", "confianca": 0-100, "detalhe": "string"}],\n'
+        '  "sintese_operacional": "string objetiva para decisao do ALFA",\n'
+        '  "relato_detalhado": "string completa descrevendo ambiente, pessoas, objetos e elementos criticos visiveis",\n'
+        '  "pontos_atencao": ["string"]\n'
+        "}\n"
+        "Nao inclua recomendacoes taticas de intervencao; seja factual, preciso e claro."
+    )
+
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": mime, "data": img_b64}}
+            ]
+        }],
+        "generationConfig": {
+            "temperature": 0.1,
+            "responseMimeType": "application/json"
+        }
+    }
+
+    ultimo_erro = "Nenhum modelo respondeu."
+    for modelo in MODELOS_CANDIDATOS:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent?key={GEMINI_API_KEY}"
+        for tentativa in range(2):
+            try:
+                resp = requests.post(url, json=payload, timeout=45)
+                if resp.status_code in (429, 500, 502, 503, 504):
+                    ultimo_erro = f"HTTP {resp.status_code} no modelo {modelo}"
+                    time.sleep(1.2 * (tentativa + 1))
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                candidatos = data.get("candidates") or []
+                if not candidatos:
+                    ultimo_erro = f"Sem candidatos retornados por {modelo}"
+                    break
+                partes = (candidatos[0].get("content") or {}).get("parts") or []
+                texto_resp = "".join(str(p.get("text", "")) for p in partes if isinstance(p, dict)).strip()
+                parsed = extrair_json_robusto(texto_resp)
+                if parsed is not None:
+                    return parsed, modelo
+                if texto_resp:
+                    return {
+                        "arma_fogo": False,
+                        "arma_branca": False,
+                        "pessoas_visiveis": 0,
+                        "nivel_sugerido": "OBSERVACAO",
+                        "objetos": [],
+                        "sintese_operacional": texto_resp[:240],
+                        "relato_detalhado": texto_resp,
+                        "pontos_atencao": ["Resposta textual livre retornada pela IA"]
+                    }, modelo
+                ultimo_erro = f"Resposta vazia do modelo {modelo}"
+            except Exception as exc:
+                ultimo_erro = f"{modelo}: {exc}"
+                time.sleep(0.8)
+
+    raise RuntimeError(ultimo_erro)
 
 
 def analisar_imagem_ia(caminho: Path):
-    mime, det_amb = detalhes_ambiente(caminho)
+    mime, img_b64, det_amb = preparar_imagem_otimizada(caminho)
 
     if not GEMINI_API_KEY:
         return {
             "status": "SEM_CHAVE_IA_CONFIGURADA",
             "nivel": "NORMAL",
+            "pessoas_visiveis": 0,
             "objetos": [],
+            "sintese_operacional": "Chave GEMINI_API_KEY ausente no ambiente.",
             "relato_visual": "Configure GEMINI_API_KEY nas variaveis de ambiente do Render para analise visual real da imagem.",
+            "pontos_atencao": ["Configurar GEMINI_API_KEY no Render"],
+            "detalhes_cena": det_amb
+        }
+
+    if not img_b64:
+        return {
+            "status": "FALHA_LEITURA_IMAGEM",
+            "nivel": "NORMAL",
+            "pessoas_visiveis": 0,
+            "objetos": [],
+            "sintese_operacional": "Nao foi possivel ler os bytes da imagem.",
+            "relato_visual": "Falha ao carregar o arquivo de imagem para analise.",
+            "pontos_atencao": ["Verificar integridade do arquivo de imagem"],
             "detalhes_cena": det_amb
         }
 
     try:
-        img_bytes = caminho.read_bytes()
-        img_b64 = base64.b64encode(img_bytes).decode("utf-8")
-
-        prompt = (
-            "Analise exclusivamente o conteudo visual desta imagem (nao use o nome do arquivo). "
-            "Identifique se ha arma de fogo (revolver, pistola, rifle, espingarda, etc.), arma branca ou objetos relevantes e pessoas. "
-            "Responda APENAS em JSON valido sem markdown com as chaves: "
-            '{"arma_fogo": bool, "arma_branca": bool, "objetos": [{"rotulo": str, "confianca": float}], "relato": str}. '
-            "Seja objetivo, sem recomendacoes taticas."
-        )
-
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-        payload = {
-            "contents": [{
-                "parts": [
-                    {"text": prompt},
-                    {"inline_data": {"mime_type": mime, "data": img_b64}}
-                ]
-            }],
-            "generationConfig": {"temperature": 0.1}
-        }
-
-        resp = requests.post(url, json=payload, timeout=35)
-        resp.raise_for_status()
-        data = resp.json()
-
-        texto_resp = (
-            data.get("candidates", [{}])[0]
-            .get("content", {})
-            .get("parts", [{}])[0]
-            .get("text", "")
-            .strip()
-        )
-        texto_limpo = texto_resp.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        parsed = json.loads(texto_limpo)
+        parsed, modelo_usado = consultar_gemini_com_fallback(mime, img_b64)
 
         arma_fogo = bool(parsed.get("arma_fogo", False))
         arma_branca = bool(parsed.get("arma_branca", False))
-        objetos = parsed.get("objetos") if isinstance(parsed.get("objetos"), list) else []
-        relato = str(parsed.get("relato") or "Analise visual concluida.").strip()
+        try:
+            pessoas = max(0, int(parsed.get("pessoas_visiveis", 0) or 0))
+        except Exception:
+            pessoas = 0
 
+        objetos_brutos = parsed.get("objetos")
+        objetos = []
+        if isinstance(objetos_brutos, list):
+            for item in objetos_brutos:
+                if isinstance(item, dict):
+                    rotulo = str(item.get("rotulo") or item.get("classe") or "Elemento").strip()
+                    det = str(item.get("detalhe") or "").strip()
+                    conf_raw = item.get("confianca")
+                    conf_txt = ""
+                    try:
+                        if conf_raw is not None and str(conf_raw).strip() != "":
+                            c_val = float(conf_raw)
+                            if 0.0 <= c_val <= 1.0:
+                                c_val *= 100.0
+                            conf_txt = f"{round(c_val, 1)}%"
+                    except Exception:
+                        conf_txt = ""
+                    objetos.append({
+                        "rotulo": rotulo,
+                        "confianca": conf_txt,
+                        "detalhe": det
+                    })
+
+        sintese = str(parsed.get("sintese_operacional") or "").strip()
+        relato = str(parsed.get("relato_detalhado") or parsed.get("relato") or "Analise visual concluida.").strip()
+
+        pontos_brutos = parsed.get("pontos_atencao")
+        pontos = []
+        if isinstance(pontos_brutos, list):
+            pontos = [str(p).strip() for p in pontos_brutos if str(p).strip()]
+
+        nivel_ia = str(parsed.get("nivel_sugerido") or "").strip().upper()
         if arma_fogo:
             status = "ARMA_DE_FOGO_IDENTIFICADA"
-            nivel = "ATENCAO_ELEVADA"
+            nivel = "ALTO_RISCO" if nivel_ia not in ("ATENCAO_ELEVADA", "ALTO_RISCO") else nivel_ia
         elif arma_branca:
             status = "ARMA_BRANCA_IDENTIFICADA"
-            nivel = "OBSERVACAO"
+            nivel = "ATENCAO_ELEVADA" if nivel_ia not in ("OBSERVACAO", "ATENCAO_ELEVADA", "ALTO_RISCO") else nivel_ia
         else:
-            status = "SEM_ARMA_IDENTIFICADA"
-            nivel = "NORMAL"
+            status = "ANALISE_VISUAL_CONCLUIDA"
+            nivel = nivel_ia if nivel_ia in ("NORMAL", "OBSERVACAO", "ATENCAO_ELEVADA", "ALTO_RISCO") else "NORMAL"
+
+        if not sintese:
+            sintese = relato[:220]
 
         return {
             "status": status,
             "nivel": nivel,
+            "pessoas_visiveis": pessoas,
             "objetos": objetos,
+            "sintese_operacional": sintese,
             "relato_visual": relato,
-            "detalhes_cena": det_amb
+            "pontos_atencao": pontos,
+            "detalhes_cena": f"{det_amb} | IA: {modelo_usado}"
         }
     except Exception as exc:
         return {
             "status": "FALHA_CONSULTA_IA",
             "nivel": "NORMAL",
+            "pessoas_visiveis": 0,
             "objetos": [],
+            "sintese_operacional": "Falha temporaria na consulta externa de IA; nova tentativa no proximo ciclo.",
             "relato_visual": f"Falha na consulta visual externa: {exc}",
+            "pontos_atencao": ["Verificar cota/conectividade da GEMINI_API_KEY"],
             "detalhes_cena": det_amb
         }
 
@@ -208,7 +350,7 @@ def avancar_ciclo():
     STATE["mensagens"].append({
         "origem": "GUARDIAO",
         "hora": agora.strftime("%H:%M:%S"),
-        "texto": f"[{oc['id']}] {oc['nivel']} — {oc['relato_visual']}"
+        "texto": f"[{oc['id']}] {oc['nivel']} — {oc['sintese_operacional']}"
     })
     STATE["mensagens"] = STATE["mensagens"][-150:]
 
@@ -391,8 +533,9 @@ img.foto{max-width:100%;width:auto;max-height:270px;border-radius:6px;display:bl
 button{padding:7px 10px;border:none;border-radius:6px;cursor:pointer;font-weight:600;color:#fff;font-size:12px;max-width:100%}
 .b-bravo{background:#dc2626}.b-arq{background:#2563eb}.b-desarq{background:#059669}.b-pausa{background:#475569}.b-env{background:#0284c7}
 input{background:#0b101b;color:#fff;border:1px solid #334155;border-radius:6px;padding:6px;font-size:12px;min-width:0;max-width:100%}
-.box{background:#0b101b;border:1px solid #1e293b;border-radius:6px;padding:8px;max-height:165px;overflow-y:auto;overflow-x:hidden;font-size:12px;overflow-wrap:anywhere;word-break:break-word;max-width:100%}
+.box{background:#0b101b;border:1px solid #1e293b;border-radius:6px;padding:8px;max-height:195px;overflow-y:auto;overflow-x:hidden;font-size:12px;overflow-wrap:anywhere;word-break:break-word;max-width:100%}
 .item{border-bottom:1px solid #1e293b;padding:5px 0}
+.linha-rel{margin-top:4px;line-height:1.35}
 .crit{color:#fca5a5}.med{color:#fcd34d}.seg{color:#86efac}
 @media(max-width:980px){.grid{grid-template-columns:minmax(0,1fr)}}
 </style>
@@ -415,8 +558,8 @@ input{background:#0b101b;color:#fff;border:1px solid #334155;border-radius:6px;p
       </div>
     </div>
     <div class="card">
-      <h3>RELATORIO DE ANALISE DO QUE A IA VE</h3>
-      <div id="relatorio" class="box" style="max-height:190px"></div>
+      <h3>RELATORIO SITUACIONAL DO GUARDIAO (DECISAO ALFA)</h3>
+      <div id="relatorio" class="box" style="max-height:240px"></div>
     </div>
     <div class="card">
       <h3>DESARQUIVAR OCORRENCIA POR PERIODO</h3>
@@ -453,6 +596,9 @@ input{background:#0b101b;color:#fff;border:1px solid #334155;border-radius:6px;p
   </div>
 </div>
 <script>
+function esc(s){
+  return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
 async function acao(url){
   const id = window._atualId || "";
   await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})});
@@ -504,23 +650,31 @@ async function atualizar(){
     window._atualId = a.id;
     document.getElementById("foto").src = "/imagem?t=" + encodeURIComponent(a.id + "_" + a.situacao_fluxo);
     document.getElementById("meta").textContent = "ID: "+a.id+" | "+a.arquivo+" ("+a.indice+"/"+a.total+") | "+a.situacao_fluxo;
-    const objs = (a.objetos||[]).map(x => (x.rotulo||"") + (x.confianca ? " ("+x.confianca+"%)" : "")).filter(Boolean).join(", ") || "Nada classificado acima do limiar";
+    const objs = (a.objetos||[]).map(x => {
+      const rot = esc(x.rotulo || "");
+      const det = x.detalhe ? " [" + esc(x.detalhe) + "]" : "";
+      const conf = x.confianca ? " (" + esc(x.confianca) + ")" : "";
+      return (rot + det + conf).trim();
+    }).filter(Boolean).join("; ") || "Nenhum objeto critico isolado";
+    const pontos = (a.pontos_atencao||[]).map(p => esc(p)).join(" | ") || "Sem pontos adicionais";
     const cls = (a.nivel==="ALTO_RISCO"||a.nivel==="ATENCAO_ELEVADA")?"crit":(a.nivel==="OBSERVACAO"||a.nivel==="REGISTRO_OBJETO"?"med":"seg");
     document.getElementById("relatorio").innerHTML =
-      "<div class='"+cls+"'><b>NIVEL:</b> "+a.nivel+" | <b>STATUS:</b> "+a.status+"</div>"+
-      "<div><b>OBJETOS IDENTIFICADOS:</b> "+objs+"</div>"+
-      "<div><b>RELATO DA CENA:</b> "+a.relato_visual+"</div>"+
-      "<div><b>DETALHES DO AMBIENTE:</b> "+a.detalhes_cena+"</div>"+
-      (a.retorno_bravo ? "<div><b>RETORNO BRAVO:</b> "+a.retorno_bravo+"</div>" : "");
+      "<div class='"+cls+"'><b>NIVEL:</b> "+esc(a.nivel)+" | <b>STATUS:</b> "+esc(a.status)+" | <b>PESSOAS:</b> "+esc(a.pessoas_visiveis ?? 0)+"</div>"+
+      "<div class='linha-rel'><b>SINTESE OPERACIONAL (ALFA):</b> "+esc(a.sintese_operacional || a.relato_visual)+"</div>"+
+      "<div class='linha-rel'><b>ELEMENTOS / OBJETOS VISIVEIS:</b> "+objs+"</div>"+
+      "<div class='linha-rel'><b>RELATO COMPLETO DA CENA:</b> "+esc(a.relato_visual)+"</div>"+
+      "<div class='linha-rel'><b>PONTOS DE ATENCAO:</b> "+pontos+"</div>"+
+      "<div class='linha-rel'><b>AMBIENTE / TELEMETRIA:</b> "+esc(a.detalhes_cena)+"</div>"+
+      (a.retorno_bravo ? "<div class='linha-rel'><b>RETORNO BRAVO:</b> "+esc(a.retorno_bravo)+"</div>" : "");
   }
   const boxBravo = document.getElementById("boxBravo");
   const boxMsg = document.getElementById("boxMsg");
   const boxHist = document.getElementById("boxHist");
   const listaArq = document.getElementById("listaArq");
-  boxBravo.innerHTML = (d.retorno_bravo||[]).map(x => "<div class='item'>["+x.hora+"] <b>"+x.ocorrencia_id+":</b> "+x.texto+"</div>").join("");
-  boxMsg.innerHTML = (d.mensagens||[]).map(x => "<div class='item'>["+x.hora+"] <b>"+x.origem+":</b> "+x.texto+"</div>").join("");
-  boxHist.innerHTML = (d.ativas||[]).map(x => "<div class='item'><b>"+x.id+"</b> ("+x.data_hora+") ["+x.situacao_fluxo+"] — "+x.nivel+": "+x.relato_visual+"</div>").join("");
-  listaArq.innerHTML = (d.arquivadas||[]).map(x => "<div class='item'>[ARQUIVADA] <b>"+x.id+"</b> — "+x.data_hora+" — "+x.arquivo+"</div>").join("");
+  boxBravo.innerHTML = (d.retorno_bravo||[]).map(x => "<div class='item'>["+esc(x.hora)+"] <b>"+esc(x.ocorrencia_id)+":</b> "+esc(x.texto)+"</div>").join("");
+  boxMsg.innerHTML = (d.mensagens||[]).map(x => "<div class='item'>["+esc(x.hora)+"] <b>"+esc(x.origem)+":</b> "+esc(x.texto)+"</div>").join("");
+  boxHist.innerHTML = (d.ativas||[]).map(x => "<div class='item'><b>"+esc(x.id)+"</b> ("+esc(x.data_hora)+") ["+esc(x.situacao_fluxo)+"] — <b>"+esc(x.nivel)+"</b>: "+esc(x.sintese_operacional || x.relato_visual)+"</div>").join("");
+  listaArq.innerHTML = (d.arquivadas||[]).map(x => "<div class='item'>[ARQUIVADA] <b>"+esc(x.id)+"</b> — "+esc(x.data_hora)+" — "+esc(x.arquivo)+"</div>").join("");
   rolarBaixo(boxBravo);
   rolarBaixo(boxMsg);
   rolarBaixo(boxHist);
