@@ -315,7 +315,12 @@ async def pausa():
 
 @app.get("/", response_class=HTMLResponse)
 async def home():
-    return """<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GUARDIAO DF-360</title>
+    return """<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GUARDIAO DF-360</title>
 <style>
 *,*::before,*::after{box-sizing:border-box}
 html,body{margin:0;padding:0;width:100%;max-width:100%;overflow-x:clip;background:#090d16;color:#e6eef8;font-family:Segoe UI,sans-serif}
@@ -335,7 +340,9 @@ input{background:#0b101b;color:#fff;border:1px solid #334155;border-radius:6px;p
 .item{border-bottom:1px solid #1e293b;padding:5px 0}
 .crit{color:#fca5a5}.med{color:#fcd34d}.seg{color:#86efac}
 @media(max-width:980px){.grid{grid-template-columns:minmax(0,1fr)}}
-</style></head><body>
+</style>
+</head>
+<body>
 <header>
   <div><b>GUARDIAO DF-360 — SSPDF / DF-360</b> | Ciclo: <span id="ciclo">02:00</span></div>
   <div class="relogio" id="relogio">--/--/---- --:--:--</div>
@@ -458,4 +465,20 @@ async function atualizar(){
   boxBravo.innerHTML = (d.retorno_bravo||[]).map(x => "<div class='item'>["+x.hora+"] <b>"+x.ocorrencia_id+":</b> "+x.texto+"</div>").join("");
   boxMsg.innerHTML = (d.mensagens||[]).map(x => "<div class='item'>["+x.hora+"] <b>"+x.origem+":</b> "+x.texto+"</div>").join("");
   boxHist.innerHTML = (d.ativas||[]).map(x => "<div class='item'><b>"+x.id+"</b> ("+x.data_hora+") ["+x.situacao_fluxo+"] — "+x.nivel+": "+x.relato_visual+"</div>").join("");
-  listaArq.innerHTML = (d.arqu
+  listaArq.innerHTML = (d.arquivadas||[]).map(x => "<div class='item'>[ARQUIVADA] <b>"+x.id+"</b> — "+x.data_hora+" — "+x.arquivo+"</div>").join("");
+  rolarBaixo(boxBravo);
+  rolarBaixo(boxMsg);
+  rolarBaixo(boxHist);
+  rolarBaixo(listaArq);
+}
+atualizar();
+setInterval(atualizar, 1000);
+</script>
+</body>
+</html>"""
+
+
+if __name__ == "__main__":
+    import uvicorn
+    porta = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=porta, workers=1)
