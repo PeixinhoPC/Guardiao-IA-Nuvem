@@ -1,6 +1,3 @@
 fastapi
 uvicorn
-ultralytics
-python-multipart
-Pillow
-opencv-python
+pillow
