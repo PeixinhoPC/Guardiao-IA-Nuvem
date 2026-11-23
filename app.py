@@ -5,16 +5,22 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
-from PIL import Image, ImageStat
+from PIL import Image, ImageFilter, ImageStat
 
+TZ_BR = ZoneInfo("America/Sao_Paulo")
 BASE_DIR = Path(__file__).resolve().parent
 MONITOR_DIR = BASE_DIR / "IMAGENS_MONITOR"
 INTERVALO_SEG = 120
 MODO_DEMO_RETORNO_BRAVO = True
 
 app = FastAPI(title="GUARDIAO DF-360 — SSPDF")
+
+
+def agora_br() -> datetime:
+    return datetime.now(TZ_BR)
 
 
 def listar_imagens():
@@ -42,13 +48,13 @@ STATE = {
     "mensagens": [
         {
             "origem": "GUARDIAO",
-            "hora": datetime.now().strftime("%H:%M:%S"),
-            "texto": "GUARDIAO DF-360 online na nuvem. Relato objetivo de cena a cada 2 minutos."
+            "hora": agora_br().strftime("%H:%M:%S"),
+            "texto": "GUARDIAO DF-360 online na nuvem. Analise visual direta da imagem a cada 2 minutos."
         }
     ],
     "retorno_bravo": [
         {
-            "hora": datetime.now().strftime("%H:%M:%S"),
+            "hora": agora_br().strftime("%H:%M:%S"),
             "ocorrencia_id": "SISTEMA",
             "texto": "Aguardando despacho do ALFA para a equipe BRAVO."
         }
@@ -56,13 +62,15 @@ STATE = {
 }
 
 
-def analisar_imagem(caminho: Path):
-    nome_lower = caminho.name.lower()
+def analisar_imagem_real(caminho: Path):
     objetos = []
     obs_cena = []
     img_w, img_h = 1, 1
     brilho = 128.0
     contraste = 50.0
+    densidade_bordas = 0.0
+    razao_regiao = 1.0
+    area_pct = 0.0
 
     try:
         with Image.open(caminho) as im:
@@ -71,47 +79,92 @@ def analisar_imagem(caminho: Path):
             stat = ImageStat.Stat(im_rgb)
             brilho = sum(stat.mean) / 3.0
             contraste = sum(stat.stddev) / 3.0
+
             if brilho < 55:
                 obs_cena.append("Baixa luminosidade")
+            elif brilho > 215:
+                obs_cena.append("Alta luminosidade")
             if img_w < 300 or img_h < 300:
                 obs_cena.append("Resolucao reduzida")
+
+            # Reduz para ate 320px no maior lado para manter baixo consumo de RAM em nuvem gratuita
+            trabalho = im_rgb.copy()
+            trabalho.thumbnail((320, 320))
+            tw, th = trabalho.size
+            cinza = trabalho.convert("L")
+            bordas = cinza.filter(ImageFilter.FIND_EDGES)
+            b_stat = ImageStat.Stat(bordas)
+            densidade_bordas = b_stat.mean[0]
+
+            # Estimativa de regiao ativa por diferenca em relacao a media de borda/luminancia
+            px_c = cinza.load()
+            px_b = bordas.load()
+            media_c = ImageStat.Stat(cinza).mean[0]
+
+            min_x, min_y = tw, th
+            max_x, max_y = -1, -1
+            ativos = 0
+            total_px = max(1, tw * th)
+
+            for y in range(th):
+                for x in range(tw):
+                    dif_lum = abs(px_c[x, y] - media_c)
+                    borda_val = px_b[x, y]
+                    if dif_lum > 38 or borda_val > 45:
+                        ativos += 1
+                        if x < min_x:
+                            min_x = x
+                        if x > max_x:
+                            max_x = x
+                        if y < min_y:
+                            min_y = y
+                        if y > max_y:
+                            max_y = y
+
+            area_pct = round((ativos / total_px) * 100.0, 1)
+            if max_x > min_x and max_y > min_y:
+                bw = max(1, max_x - min_x + 1)
+                bh = max(1, max_y - min_y + 1)
+                razao_regiao = bw / float(bh)
+            else:
+                razao_regiao = img_w / max(1.0, float(img_h))
+
     except Exception as exc:
-        obs_cena.append(f"Falha ao abrir imagem: {exc}")
+        obs_cena.append(f"Falha na leitura da imagem: {exc}")
+        return {
+            "status": "SEM_CLASSIFICACAO_CONCLUSIVA",
+            "nivel": "NORMAL",
+            "objetos": [],
+            "relato_visual": "Falha ao processar os pixels da imagem.",
+            "detalhes_cena": f"{img_w}x{img_h}px | " + " | ".join(obs_cena)
+        }
 
-    conf_base = round(min(96.5, max(72.0, 75.0 + (contraste * 0.25))), 1)
-
-    if any(k in nome_lower for k in ("pistola", "pistol", "handgun")):
-        objetos.append({"classe": "pistola", "rotulo": "Pistola / Arma de fogo", "confianca": conf_base})
-        status = "ARMA_DE_FOGO_IDENTIFICADA"
-        nivel = "ATENCAO_ELEVADA"
-        relato = f"Visualizada Pistola / Arma de fogo ({conf_base}%) na cena analisada."
-    elif any(k in nome_lower for k in ("revolver", "rifle", "shotgun", "bar1918", "firearm", "gun")):
-        rotulo_arma = "Rifle / Arma longa" if "rifle" in nome_lower else (
-            "Espingarda / Arma longa" if "shotgun" in nome_lower else "Revolver / Arma de fogo"
-        )
-        objetos.append({"classe": "arma_fogo", "rotulo": rotulo_arma, "confianca": conf_base})
-        status = "ARMA_DE_FOGO_IDENTIFICADA"
-        nivel = "ATENCAO_ELEVADA"
-        relato = f"Visualizada {rotulo_arma} ({conf_base}%) na cena analisada."
-    elif "knife" in nome_lower or "faca" in nome_lower:
-        objetos.append({"classe": "arma_branca", "rotulo": "Arma branca (faca)", "confianca": conf_base})
-        status = "ARMA_BRANCA_IDENTIFICADA"
+    # Classificacao puramente visual (sem leitura de nome de arquivo)
+    # Estrutura alongada horizontalmente com bordas marcadas sugere objeto/estrutura alongada
+    if razao_regiao >= 2.2 and densidade_bordas >= 16.0 and contraste >= 28.0:
+        conf = round(min(94.0, max(65.0, 62.0 + (densidade_bordas * 0.45) + (contraste * 0.15))), 1)
+        objetos.append({
+            "classe": "estrutura_alongada",
+            "rotulo": "Objeto/estrutura alongada na cena (proporcao horizontal)",
+            "confianca": conf
+        })
+        status = "OBSERVACAO_VISUAL"
         nivel = "OBSERVACAO"
-        relato = f"Visualizada Arma branca (faca) ({conf_base}%) na cena analisada."
-    elif "wallet" in nome_lower or "carteira" in nome_lower:
-        objetos.append({"classe": "carteira", "rotulo": "Carteira", "confianca": conf_base})
-        status = "SEM_ARMA_IDENTIFICADA"
-        nivel = "NORMAL"
-        relato = "Visualizada carteira na cena; nenhuma arma identificada."
-    elif "iphone" in nome_lower or "phone" in nome_lower:
-        objetos.append({"classe": "celular", "rotulo": "Telefone celular", "confianca": conf_base})
-        status = "SEM_ARMA_IDENTIFICADA"
-        nivel = "NORMAL"
-        relato = "Visualizado telefone celular na cena; nenhuma arma identificada."
+        relato = f"Identificada estrutura/objeto alongado na imagem (proporcao {razao_regiao:.1f}:1, indice visual {conf}%)."
+    elif densidade_bordas >= 18.0 and area_pct >= 8.0:
+        conf = round(min(90.0, max(60.0, 58.0 + (densidade_bordas * 0.4))), 1)
+        objetos.append({
+            "classe": "alvo_definido",
+            "rotulo": "Elemento de alto contraste/borda na cena",
+            "confianca": conf
+        })
+        status = "REGISTRO_VISUAL"
+        nivel = "OBSERVACAO"
+        relato = f"Identificado elemento com contorno definido na imagem (area ativa {area_pct}%, indice visual {conf}%)."
     else:
-        status = "SEM_ARMA_IDENTIFICADA"
+        status = "SEM_ANOMALIA_VISUAL_APARENTE"
         nivel = "NORMAL"
-        relato = "Nenhuma arma identificada na imagem analisada."
+        relato = "Nenhuma estrutura ou objeto critico isolado de forma conclusiva na imagem."
 
     if not obs_cena:
         obs_cena.append("Enquadramento e iluminacao regulares")
@@ -121,7 +174,11 @@ def analisar_imagem(caminho: Path):
         "nivel": nivel,
         "objetos": objetos,
         "relato_visual": relato,
-        "detalhes_cena": f"{img_w}x{img_h}px | Brilho {round(brilho, 1)} | " + " | ".join(obs_cena)
+        "detalhes_cena": (
+            f"{img_w}x{img_h}px | Brilho {round(brilho, 1)} | "
+            f"Contraste {round(contraste, 1)} | Bordas {round(densidade_bordas, 1)} | "
+            + " | ".join(obs_cena)
+        )
     }
 
 
@@ -131,8 +188,8 @@ def avancar_ciclo():
         return
     STATE["indice"] = (STATE["indice"] + 1) % len(imagens)
     arq = imagens[STATE["indice"]]
-    agora = datetime.now()
-    analise = analisar_imagem(arq)
+    agora = agora_br()
+    analise = analisar_imagem_real(arq)
 
     oc = {
         "id": f"OC-{agora.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4].upper()}",
@@ -163,7 +220,7 @@ async def simular_retorno_bravo_demo(oc_id: str):
     if not MODO_DEMO_RETORNO_BRAVO:
         return
     await asyncio.sleep(8)
-    hora = datetime.now().strftime("%H:%M:%S")
+    hora = agora_br().strftime("%H:%M:%S")
     relatos = [
         "[DEMO] Equipe BRAVO em deslocamento ate o ponto informado pelo ALFA.",
         "[DEMO] Equipe BRAVO no local; averiguacao em andamento.",
@@ -205,8 +262,9 @@ async def api_estado():
     restante = max(0, int(INTERVALO_SEG - (time.time() - STATE["ultima_troca"]))) if not STATE["pausado"] else int(INTERVALO_SEG)
     ativas = [o for o in STATE["historico"] if o.get("situacao_fluxo") != "ARQUIVADA"]
     arquivadas = [o for o in STATE["historico"] if o.get("situacao_fluxo") == "ARQUIVADA"]
+    agora = agora_br()
     return {
-        "agora": datetime.now().strftime("%d/%m/%Y — %H:%M:%S"),
+        "agora": agora.strftime("%d/%m/%Y — %H:%M:%S"),
         "restante": restante,
         "pausado": STATE["pausado"],
         "modo_demo_retorno": MODO_DEMO_RETORNO_BRAVO,
@@ -222,7 +280,7 @@ async def api_estado():
 async def enviar_bravo(req: Request):
     dados = await req.json()
     oc_id = dados.get("id") or (STATE["atual"]["id"] if STATE["atual"] else "N/A")
-    hora = datetime.now().strftime("%H:%M:%S")
+    hora = agora_br().strftime("%H:%M:%S")
     for o in STATE["historico"]:
         if o["id"] == oc_id:
             o["situacao_fluxo"] = "ENVIADO_AO_BRAVO"
@@ -241,7 +299,7 @@ async def retorno_bravo(req: Request):
     texto = (dados.get("texto") or "").strip()
     oc_id = (dados.get("oc_id") or (STATE["atual"]["id"] if STATE["atual"] else "GERAL")).strip()
     if texto:
-        hora = datetime.now().strftime("%H:%M:%S")
+        hora = agora_br().strftime("%H:%M:%S")
         STATE["retorno_bravo"].append({"hora": hora, "ocorrencia_id": oc_id, "texto": texto})
         STATE["retorno_bravo"] = STATE["retorno_bravo"][-30:]
         for o in STATE["historico"]:
@@ -276,7 +334,7 @@ async def desarquivar_periodo(req: Request):
     for o in STATE["historico"]:
         if o.get("situacao_fluxo") == "ARQUIVADA":
             try:
-                odt = datetime.fromisoformat(o.get("iso_dt", ""))
+                odt = datetime.fromisoformat(o.get("iso_dt", "")).replace(tzinfo=None)
             except Exception:
                 odt = None
             dentro = True
@@ -298,7 +356,7 @@ async def mensagem(req: Request):
     dados = await req.json()
     texto = (dados.get("texto") or "").strip()
     if texto:
-        hora = datetime.now().strftime("%H:%M:%S")
+        hora = agora_br().strftime("%H:%M:%S")
         STATE["mensagens"].append({"origem": "ALFA", "hora": hora, "texto": texto})
         STATE["mensagens"].append({"origem": "GUARDIAO", "hora": hora, "texto": f"Registrado pelo GUARDIAO: '{texto}'."})
         STATE["mensagens"] = STATE["mensagens"][-150:]
