@@ -22,9 +22,13 @@ INTERVALO_SEG = 120
 MODO_DEMO_RETORNO_BRAVO = True
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL_ENV = os.environ.get("GEMINI_MODEL", "").strip()
-MODELOS_CANDIDATOS = [m for m in [GEMINI_MODEL_ENV, "gemini-2.5-flash", "gemini-2.0-flash"] if m]
 
 app = FastAPI(title="GUARDIAO DF-360 — SSPDF")
+
+_MODELOS_CACHE = {
+    "lista": [],
+    "expira": 0.0
+}
 
 
 def agora_br() -> datetime:
@@ -124,9 +128,9 @@ def inspecionar_imagem(caminho: Path):
                 razao_regiao = max(1, max_x - min_x + 1) / float(max(1, max_y - min_y + 1))
 
             otimizada = im_rgb.copy()
-            otimizada.thumbnail((1024, 1024))
+            otimizada.thumbnail((960, 960))
             buf = BytesIO()
-            otimizada.save(buf, format="JPEG", quality=85, optimize=True)
+            otimizada.save(buf, format="JPEG", quality=82, optimize=True)
             b64_data = base64.b64encode(buf.getvalue()).decode("utf-8")
     except Exception as exc:
         obs_cena.append(f"Leitura visual com restricao: {exc}")
@@ -152,6 +156,51 @@ def inspecionar_imagem(caminho: Path):
         "razao": razao_regiao,
         "obs": obs_cena
     }
+
+
+def obter_modelos_disponiveis():
+    agora = time.time()
+    if _MODELOS_CACHE["lista"] and agora < _MODELOS_CACHE["expira"]:
+        return _MODELOS_CACHE["lista"]
+
+    padrao = [
+        m for m in [
+            GEMINI_MODEL_ENV,
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-2.0-flash",
+            "gemini-1.5-flash"
+        ] if m
+    ]
+
+    descobertos = []
+    if GEMINI_API_KEY:
+        for ver in ("v1beta", "v1"):
+            try:
+                r = requests.get(
+                    f"https://generativelanguage.googleapis.com/{ver}/models?key={GEMINI_API_KEY}",
+                    timeout=10
+                )
+                if r.status_code == 200:
+                    for item in (r.json().get("models") or []):
+                        nome = str(item.get("name") or "").replace("models/", "").strip()
+                        metodos = item.get("supportedGenerationMethods") or []
+                        if nome and ("generateContent" in metodos or not metodos):
+                            if "gemini" in nome.lower() and nome not in descobertos:
+                                descobertos.append(nome)
+                    if descobertos:
+                        break
+            except Exception:
+                pass
+
+    ordenados = []
+    for m in padrao + descobertos:
+        if m not in ordenados:
+            ordenados.append(m)
+
+    _MODELOS_CACHE["lista"] = ordenados[:6]
+    _MODELOS_CACHE["expira"] = agora + 900.0
+    return _MODELOS_CACHE["lista"]
 
 
 def analise_visual_fallback(info: dict):
@@ -188,15 +237,15 @@ def analise_visual_fallback(info: dict):
         status = "REGISTRO_VISUAL"
         sintese = "Cena registrada com elementos de contorno definido; sem alerta critico isolado."
         relato = (
-            "A inspeção visual identifica objetos ou superfícies com contornos nítidos no quadro, "
-            "sem indicio conclusivo de armamento ou ameaça imediata isolada."
+            "A inspecao visual identifica objetos ou superficies com contornos nitidos no quadro, "
+            "sem indicio conclusivo de armamento ou ameaca imediata isolada."
         )
     else:
         nivel = "NORMAL"
         status = "SEM_ANOMALIA_APARENTE"
         sintese = "Cena sem anomalias visuais evidentes no enquadramento atual."
         relato = (
-            "A leitura visual da imagem indica cena sem elementos críticos isolados de forma conclusiva "
+            "A leitura visual da imagem indica cena sem elementos criticos isolados de forma conclusiva "
             "no momento da captura."
         )
 
@@ -216,13 +265,12 @@ def extrair_json_robusto(texto: str):
     if not texto:
         return None
     limpo = re.sub(r"```(?:json)?|```", "", texto, flags=re.IGNORECASE).strip()
-    for candidato in (limpo,):
-        try:
-            obj = json.loads(candidato)
-            if isinstance(obj, dict):
-                return obj
-        except Exception:
-            pass
+    try:
+        obj = json.loads(limpo)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
     ini = limpo.find("{")
     fim = limpo.rfind("}")
     if ini != -1 and fim != -1 and fim > ini:
@@ -233,30 +281,29 @@ def extrair_json_robusto(texto: str):
         except Exception:
             pass
     return None
-
-
-def consultar_visao_externa(mime: str, img_b64: str):
+    def consultar_visao_externa(mime: str, img_b64: str):
     if not GEMINI_API_KEY or not img_b64:
         return None
 
     prompt = (
-        "Voce e o modulo de analise visual do sistema GUARDIAO DF-360 (SSPDF). "
+        "Voce e o modulo de analise visual operacional do GUARDIAO DF-360 para apoio decisorio do comando (ALFA / SSPDF). "
         "Analise EXCLUSIVAMENTE o que esta visivel na imagem (ignore completamente o nome do arquivo). "
-        "Descreva com fidelidade o ambiente, objetos visiveis (incluindo carteira, documentos, celulares, "
-        "veiculos, moveis, ferramentas, etc.), pessoas visiveis, posturas/acoes e eventual presenca de "
-        "arma de fogo ou arma branca. "
-        "Responda APENAS com um JSON valido (sem markdown, sem comentarios fora do JSON):\n"
+        "Informe com precisao factual:\n"
+        "1) Quantidade de pessoas visiveis, vestimentas, postura/posicao (em pe, sentada, deitada/caida, em movimento, imovel) e condicao aparente.\n"
+        "2) Presenca de arma de fogo (pistola, revolver, fuzil, carabina, espingarda, etc.), arma branca ou outros objetos/equipamentos/veiculos/itens.\n"
+        "3) Caracteristicas do ambiente/terreno/iluminacao e fatores de risco objetivo visiveis na cena.\n"
+        "Responda APENAS com um JSON valido (sem markdown, sem texto fora do JSON):\n"
         "{\n"
         '  "arma_fogo": bool,\n'
         '  "arma_branca": bool,\n'
         '  "pessoas_visiveis": int,\n'
         '  "nivel_sugerido": "NORMAL" | "OBSERVACAO" | "ATENCAO_ELEVADA" | "ALTO_RISCO",\n'
         '  "objetos": [{"rotulo": "string", "confianca": 0-100, "detalhe": "string"}],\n'
-        '  "sintese_operacional": "string curta e objetiva para decisao do ALFA",\n'
-        '  "relato_detalhado": "string completa e fiel do que esta na imagem",\n'
+        '  "sintese_operacional": "string direta com os fatos criticos para decisao do ALFA",\n'
+        '  "relato_detalhado": "string completa e fiel descrevendo pessoas, postura, objetos/armas e ambiente",\n'
         '  "pontos_atencao": ["string"]\n'
         "}\n"
-        "Nao mencione nomes de modelos, provedores de nuvem ou chaves de API. Seja direto e factual."
+        "Seja objetivo e factual. Nao mencione tecnologia, modelos, APIs ou plataformas."
     )
 
     payload = {
@@ -272,19 +319,21 @@ def consultar_visao_externa(mime: str, img_b64: str):
         }
     }
 
-    for modelo in MODELOS_CANDIDATOS:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent?key={GEMINI_API_KEY}"
-        for tentativa in range(2):
+    modelos = obter_modelos_disponiveis()
+    for modelo in modelos:
+        for ver in ("v1beta", "v1"):
+            url = f"https://generativelanguage.googleapis.com/{ver}/models/{modelo}:generateContent?key={GEMINI_API_KEY}"
             try:
-                resp = requests.post(url, json=payload, timeout=45)
-                if resp.status_code in (429, 500, 502, 503, 504):
-                    time.sleep(1.0 * (tentativa + 1))
+                resp = requests.post(url, json=payload, timeout=22)
+                if resp.status_code == 404:
                     continue
+                if resp.status_code in (429, 500, 502, 503, 504):
+                    break
                 resp.raise_for_status()
                 data = resp.json()
                 candidatos = data.get("candidates") or []
                 if not candidatos:
-                    break
+                    continue
                 partes = (candidatos[0].get("content") or {}).get("parts") or []
                 texto_resp = "".join(str(p.get("text", "")) for p in partes if isinstance(p, dict)).strip()
                 parsed = extrair_json_robusto(texto_resp)
@@ -302,7 +351,7 @@ def consultar_visao_externa(mime: str, img_b64: str):
                         "pontos_atencao": []
                     }
             except Exception:
-                time.sleep(0.6)
+                continue
     return None
 
 
@@ -311,7 +360,7 @@ def sanitizar_texto_operacional(txt: str) -> str:
         return ""
     limpo = re.sub(
         r"(?i)\b(gemini|google\s*ai\s*studio|generativelanguage|render|gemini_api_key|sem_chave_ia_configurada)\b",
-        "analise visual",
+        "sensor visual",
         txt
     )
     return re.sub(r"\s{2,}", " ", limpo).strip()
@@ -576,9 +625,7 @@ async def pausa():
     if not STATE["pausado"]:
         STATE["ultima_troca"] = time.time()
     return {"ok": True, "pausado": STATE["pausado"]}
-
-
-@app.get("/", response_class=HTMLResponse)
+    @app.get("/", response_class=HTMLResponse)
 async def home():
     return """<!DOCTYPE html>
 <html lang="pt-BR">
