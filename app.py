@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import json
 import os
 import random
 import time
@@ -6,15 +8,18 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+import requests
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
-from PIL import Image, ImageFilter, ImageStat
+from PIL import Image, ImageStat
 
 TZ_BR = ZoneInfo("America/Sao_Paulo")
 BASE_DIR = Path(__file__).resolve().parent
 MONITOR_DIR = BASE_DIR / "IMAGENS_MONITOR"
 INTERVALO_SEG = 120
 MODO_DEMO_RETORNO_BRAVO = True
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip()
 
 app = FastAPI(title="GUARDIAO DF-360 — SSPDF")
 
@@ -62,124 +67,116 @@ STATE = {
 }
 
 
-def analisar_imagem_real(caminho: Path):
-    objetos = []
-    obs_cena = []
+def detalhes_ambiente(caminho: Path):
     img_w, img_h = 1, 1
     brilho = 128.0
-    contraste = 50.0
-    densidade_bordas = 0.0
-    razao_regiao = 1.0
-    area_pct = 0.0
+    obs_cena = []
+    mime = "image/jpeg"
+
+    if caminho.suffix.lower() == ".png":
+        mime = "image/png"
+    elif caminho.suffix.lower() == ".webp":
+        mime = "image/webp"
 
     try:
         with Image.open(caminho) as im:
             im_rgb = im.convert("RGB")
             img_w, img_h = im_rgb.size
-            stat = ImageStat.Stat(im_rgb)
-            brilho = sum(stat.mean) / 3.0
-            contraste = sum(stat.stddev) / 3.0
-
+            brilho = sum(ImageStat.Stat(im_rgb).mean) / 3.0
             if brilho < 55:
                 obs_cena.append("Baixa luminosidade")
             elif brilho > 215:
                 obs_cena.append("Alta luminosidade")
             if img_w < 300 or img_h < 300:
                 obs_cena.append("Resolucao reduzida")
-
-            # Reduz para ate 320px no maior lado para manter baixo consumo de RAM em nuvem gratuita
-            trabalho = im_rgb.copy()
-            trabalho.thumbnail((320, 320))
-            tw, th = trabalho.size
-            cinza = trabalho.convert("L")
-            bordas = cinza.filter(ImageFilter.FIND_EDGES)
-            b_stat = ImageStat.Stat(bordas)
-            densidade_bordas = b_stat.mean[0]
-
-            # Estimativa de regiao ativa por diferenca em relacao a media de borda/luminancia
-            px_c = cinza.load()
-            px_b = bordas.load()
-            media_c = ImageStat.Stat(cinza).mean[0]
-
-            min_x, min_y = tw, th
-            max_x, max_y = -1, -1
-            ativos = 0
-            total_px = max(1, tw * th)
-
-            for y in range(th):
-                for x in range(tw):
-                    dif_lum = abs(px_c[x, y] - media_c)
-                    borda_val = px_b[x, y]
-                    if dif_lum > 38 or borda_val > 45:
-                        ativos += 1
-                        if x < min_x:
-                            min_x = x
-                        if x > max_x:
-                            max_x = x
-                        if y < min_y:
-                            min_y = y
-                        if y > max_y:
-                            max_y = y
-
-            area_pct = round((ativos / total_px) * 100.0, 1)
-            if max_x > min_x and max_y > min_y:
-                bw = max(1, max_x - min_x + 1)
-                bh = max(1, max_y - min_y + 1)
-                razao_regiao = bw / float(bh)
-            else:
-                razao_regiao = img_w / max(1.0, float(img_h))
-
     except Exception as exc:
-        obs_cena.append(f"Falha na leitura da imagem: {exc}")
-        return {
-            "status": "SEM_CLASSIFICACAO_CONCLUSIVA",
-            "nivel": "NORMAL",
-            "objetos": [],
-            "relato_visual": "Falha ao processar os pixels da imagem.",
-            "detalhes_cena": f"{img_w}x{img_h}px | " + " | ".join(obs_cena)
-        }
-
-    # Classificacao puramente visual (sem leitura de nome de arquivo)
-    # Estrutura alongada horizontalmente com bordas marcadas sugere objeto/estrutura alongada
-    if razao_regiao >= 2.2 and densidade_bordas >= 16.0 and contraste >= 28.0:
-        conf = round(min(94.0, max(65.0, 62.0 + (densidade_bordas * 0.45) + (contraste * 0.15))), 1)
-        objetos.append({
-            "classe": "estrutura_alongada",
-            "rotulo": "Objeto/estrutura alongada na cena (proporcao horizontal)",
-            "confianca": conf
-        })
-        status = "OBSERVACAO_VISUAL"
-        nivel = "OBSERVACAO"
-        relato = f"Identificada estrutura/objeto alongado na imagem (proporcao {razao_regiao:.1f}:1, indice visual {conf}%)."
-    elif densidade_bordas >= 18.0 and area_pct >= 8.0:
-        conf = round(min(90.0, max(60.0, 58.0 + (densidade_bordas * 0.4))), 1)
-        objetos.append({
-            "classe": "alvo_definido",
-            "rotulo": "Elemento de alto contraste/borda na cena",
-            "confianca": conf
-        })
-        status = "REGISTRO_VISUAL"
-        nivel = "OBSERVACAO"
-        relato = f"Identificado elemento com contorno definido na imagem (area ativa {area_pct}%, indice visual {conf}%)."
-    else:
-        status = "SEM_ANOMALIA_VISUAL_APARENTE"
-        nivel = "NORMAL"
-        relato = "Nenhuma estrutura ou objeto critico isolado de forma conclusiva na imagem."
+        obs_cena.append(f"Falha ao inspecionar imagem: {exc}")
 
     if not obs_cena:
         obs_cena.append("Enquadramento e iluminacao regulares")
 
-    return {
-        "status": status,
-        "nivel": nivel,
-        "objetos": objetos,
-        "relato_visual": relato,
-        "detalhes_cena": (
-            f"{img_w}x{img_h}px | Brilho {round(brilho, 1)} | "
-            f"Contraste {round(contraste, 1)} | Bordas {round(densidade_bordas, 1)} | "
-            + " | ".join(obs_cena)
+    return mime, f"{img_w}x{img_h}px | Brilho {round(brilho, 1)} | " + " | ".join(obs_cena)
+
+
+def analisar_imagem_ia(caminho: Path):
+    mime, det_amb = detalhes_ambiente(caminho)
+
+    if not GEMINI_API_KEY:
+        return {
+            "status": "SEM_CHAVE_IA_CONFIGURADA",
+            "nivel": "NORMAL",
+            "objetos": [],
+            "relato_visual": "Configure GEMINI_API_KEY nas variaveis de ambiente do Render para analise visual real da imagem.",
+            "detalhes_cena": det_amb
+        }
+
+    try:
+        img_bytes = caminho.read_bytes()
+        img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+
+        prompt = (
+            "Analise exclusivamente o conteudo visual desta imagem (nao use o nome do arquivo). "
+            "Identifique se ha arma de fogo (revolver, pistola, rifle, espingarda, etc.), arma branca ou objetos relevantes e pessoas. "
+            "Responda APENAS em JSON valido sem markdown com as chaves: "
+            '{"arma_fogo": bool, "arma_branca": bool, "objetos": [{"rotulo": str, "confianca": float}], "relato": str}. '
+            "Seja objetivo, sem recomendacoes taticas."
         )
-    }
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"text": prompt},
+                    {"inline_data": {"mime_type": mime, "data": img_b64}}
+                ]
+            }],
+            "generationConfig": {"temperature": 0.1}
+        }
+
+        resp = requests.post(url, json=payload, timeout=35)
+        resp.raise_for_status()
+        data = resp.json()
+
+        texto_resp = (
+            data.get("candidates", [{}])[0]
+            .get("content", {})
+            .get("parts", [{}])[0]
+            .get("text", "")
+            .strip()
+        )
+        texto_limpo = texto_resp.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        parsed = json.loads(texto_limpo)
+
+        arma_fogo = bool(parsed.get("arma_fogo", False))
+        arma_branca = bool(parsed.get("arma_branca", False))
+        objetos = parsed.get("objetos") if isinstance(parsed.get("objetos"), list) else []
+        relato = str(parsed.get("relato") or "Analise visual concluida.").strip()
+
+        if arma_fogo:
+            status = "ARMA_DE_FOGO_IDENTIFICADA"
+            nivel = "ATENCAO_ELEVADA"
+        elif arma_branca:
+            status = "ARMA_BRANCA_IDENTIFICADA"
+            nivel = "OBSERVACAO"
+        else:
+            status = "SEM_ARMA_IDENTIFICADA"
+            nivel = "NORMAL"
+
+        return {
+            "status": status,
+            "nivel": nivel,
+            "objetos": objetos,
+            "relato_visual": relato,
+            "detalhes_cena": det_amb
+        }
+    except Exception as exc:
+        return {
+            "status": "FALHA_CONSULTA_IA",
+            "nivel": "NORMAL",
+            "objetos": [],
+            "relato_visual": f"Falha na consulta visual externa: {exc}",
+            "detalhes_cena": det_amb
+        }
 
 
 def avancar_ciclo():
@@ -189,7 +186,7 @@ def avancar_ciclo():
     STATE["indice"] = (STATE["indice"] + 1) % len(imagens)
     arq = imagens[STATE["indice"]]
     agora = agora_br()
-    analise = analisar_imagem_real(arq)
+    analise = analisar_imagem_ia(arq)
 
     oc = {
         "id": f"OC-{agora.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4].upper()}",
@@ -507,7 +504,7 @@ async function atualizar(){
     window._atualId = a.id;
     document.getElementById("foto").src = "/imagem?t=" + encodeURIComponent(a.id + "_" + a.situacao_fluxo);
     document.getElementById("meta").textContent = "ID: "+a.id+" | "+a.arquivo+" ("+a.indice+"/"+a.total+") | "+a.situacao_fluxo;
-    const objs = (a.objetos||[]).map(x => x.rotulo + " ("+x.confianca+"%)").join(", ") || "Nada classificado acima do limiar";
+    const objs = (a.objetos||[]).map(x => (x.rotulo||"") + (x.confianca ? " ("+x.confianca+"%)" : "")).filter(Boolean).join(", ") || "Nada classificado acima do limiar";
     const cls = (a.nivel==="ALTO_RISCO"||a.nivel==="ATENCAO_ELEVADA")?"crit":(a.nivel==="OBSERVACAO"||a.nivel==="REGISTRO_OBJETO"?"med":"seg");
     document.getElementById("relatorio").innerHTML =
       "<div class='"+cls+"'><b>NIVEL:</b> "+a.nivel+" | <b>STATUS:</b> "+a.status+"</div>"+
