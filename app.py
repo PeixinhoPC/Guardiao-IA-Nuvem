@@ -281,7 +281,9 @@ def extrair_json_robusto(texto: str):
         except Exception:
             pass
     return None
-    def consultar_visao_externa(mime: str, img_b64: str):
+
+
+def consultar_visao_externa(mime: str, img_b64: str):
     if not GEMINI_API_KEY or not img_b64:
         return None
 
@@ -625,7 +627,9 @@ async def pausa():
     if not STATE["pausado"]:
         STATE["ultima_troca"] = time.time()
     return {"ok": True, "pausado": STATE["pausado"]}
-    @app.get("/", response_class=HTMLResponse)
+
+
+@app.get("/", response_class=HTMLResponse)
 async def home():
     return """<!DOCTYPE html>
 <html lang="pt-BR">
