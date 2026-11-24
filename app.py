@@ -98,7 +98,7 @@ def inspecionar_imagem(caminho: Path):
                 obs_cena.append("Alta luminosidade")
             if contraste < 25:
                 obs_cena.append("Baixo contraste")
-            if img_w < 300 or img_h < 300:
+            if min(img_w, img_h) < 180 or (img_w * img_h) < 60000:
                 obs_cena.append("Resolucao reduzida")
 
             pequena = im_rgb.copy()
@@ -128,9 +128,9 @@ def inspecionar_imagem(caminho: Path):
                 razao_regiao = max(1, max_x - min_x + 1) / float(max(1, max_y - min_y + 1))
 
             otimizada = im_rgb.copy()
-            otimizada.thumbnail((960, 960))
+            otimizada.thumbnail((1120, 1120))
             buf = BytesIO()
-            otimizada.save(buf, format="JPEG", quality=82, optimize=True)
+            otimizada.save(buf, format="JPEG", quality=86, optimize=True)
             b64_data = base64.b64encode(buf.getvalue()).decode("utf-8")
     except Exception as exc:
         obs_cena.append(f"Leitura visual com restricao: {exc}")
@@ -158,9 +158,9 @@ def inspecionar_imagem(caminho: Path):
     }
 
 
-def obter_modelos_disponiveis():
+def obter_modelos_disponiveis(forcar_atualizacao: bool = False):
     agora = time.time()
-    if _MODELOS_CACHE["lista"] and agora < _MODELOS_CACHE["expira"]:
+    if not forcar_atualizacao and _MODELOS_CACHE["lista"] and agora < _MODELOS_CACHE["expira"]:
         return _MODELOS_CACHE["lista"]
 
     padrao = [
@@ -179,7 +179,7 @@ def obter_modelos_disponiveis():
             try:
                 r = requests.get(
                     f"https://generativelanguage.googleapis.com/{ver}/models?key={GEMINI_API_KEY}",
-                    timeout=10
+                    timeout=8
                 )
                 if r.status_code == 200:
                     for item in (r.json().get("models") or []):
@@ -199,7 +199,7 @@ def obter_modelos_disponiveis():
             ordenados.append(m)
 
     _MODELOS_CACHE["lista"] = ordenados[:6]
-    _MODELOS_CACHE["expira"] = agora + 900.0
+    _MODELOS_CACHE["expira"] = agora + 600.0
     return _MODELOS_CACHE["lista"]
 
 
@@ -283,26 +283,31 @@ def extrair_json_robusto(texto: str):
     return None
 
 
-def consultar_visao_externa(mime: str, img_b64: str):
+def _chamar_visao_sync(mime: str, img_b64: str):
     if not GEMINI_API_KEY or not img_b64:
         return None
 
     prompt = (
         "Voce e o modulo de analise visual operacional do GUARDIAO DF-360 para apoio decisorio do comando (ALFA / SSPDF). "
         "Analise EXCLUSIVAMENTE o que esta visivel na imagem (ignore completamente o nome do arquivo). "
+        "Prioridade maxima: identifique de imediato qualquer objeto empunhado ou segurado na mao de alguem "
+        "(arma de fogo, pistola, revolver, fuzil, carabina, espingarda, faca, canivete, objeto contundente, celular, carteira, pacote etc.) "
+        "e avalie se a postura/atitude da pessoa indica ameaca, agressao, intimidacao, mira, porte ostensivo ou comportamento suspeito.\n"
         "Informe com precisao factual:\n"
-        "1) Quantidade de pessoas visiveis, vestimentas, postura/posicao (em pe, sentada, deitada/caida, em movimento, imovel) e condicao aparente.\n"
-        "2) Presenca de arma de fogo (pistola, revolver, fuzil, carabina, espingarda, etc.), arma branca ou outros objetos/equipamentos/veiculos/itens.\n"
+        "1) Quantidade de pessoas visiveis, vestimentas, postura/posicao (em pe, sentada, deitada/caida, em movimento, imovel, apontando, segurando algo) e atitude/ameaca aparente.\n"
+        "2) Objeto na mao de alguem ou presente na cena (especifique o objeto real: arma de fogo/fuzil/pistola, arma branca, carteira, celular, veiculo, etc.).\n"
         "3) Caracteristicas do ambiente/terreno/iluminacao e fatores de risco objetivo visiveis na cena.\n"
         "Responda APENAS com um JSON valido (sem markdown, sem texto fora do JSON):\n"
         "{\n"
         '  "arma_fogo": bool,\n'
         '  "arma_branca": bool,\n'
+        '  "atitude_ameaca": bool,\n'
+        '  "objeto_na_mao": "string ou vazio",\n'
         '  "pessoas_visiveis": int,\n'
         '  "nivel_sugerido": "NORMAL" | "OBSERVACAO" | "ATENCAO_ELEVADA" | "ALTO_RISCO",\n'
         '  "objetos": [{"rotulo": "string", "confianca": 0-100, "detalhe": "string"}],\n'
-        '  "sintese_operacional": "string direta com os fatos criticos para decisao do ALFA",\n'
-        '  "relato_detalhado": "string completa e fiel descrevendo pessoas, postura, objetos/armas e ambiente",\n'
+        '  "sintese_operacional": "string direta com os fatos criticos, objeto na mao e atitude para decisao do ALFA",\n'
+        '  "relato_detalhado": "string completa e fiel descrevendo pessoas, postura/atitude, objeto na mao, objetos/armas e ambiente",\n'
         '  "pontos_atencao": ["string"]\n'
         "}\n"
         "Seja objetivo e factual. Nao mencione tecnologia, modelos, APIs ou plataformas."
@@ -326,7 +331,7 @@ def consultar_visao_externa(mime: str, img_b64: str):
         for ver in ("v1beta", "v1"):
             url = f"https://generativelanguage.googleapis.com/{ver}/models/{modelo}:generateContent?key={GEMINI_API_KEY}"
             try:
-                resp = requests.post(url, json=payload, timeout=22)
+                resp = requests.post(url, json=payload, timeout=16)
                 if resp.status_code == 404:
                     continue
                 if resp.status_code in (429, 500, 502, 503, 504):
@@ -345,6 +350,8 @@ def consultar_visao_externa(mime: str, img_b64: str):
                     return {
                         "arma_fogo": False,
                         "arma_branca": False,
+                        "atitude_ameaca": False,
+                        "objeto_na_mao": "",
                         "pessoas_visiveis": 0,
                         "nivel_sugerido": "OBSERVACAO",
                         "objetos": [],
@@ -355,6 +362,10 @@ def consultar_visao_externa(mime: str, img_b64: str):
             except Exception:
                 continue
     return None
+
+
+async def consultar_visao_externa(mime: str, img_b64: str):
+    return await asyncio.to_thread(_chamar_visao_sync, mime, img_b64)
 
 
 def sanitizar_texto_operacional(txt: str) -> str:
@@ -368,21 +379,31 @@ def sanitizar_texto_operacional(txt: str) -> str:
     return re.sub(r"\s{2,}", " ", limpo).strip()
 
 
-def analisar_imagem_ia(caminho: Path):
-    info = inspecionar_imagem(caminho)
-    parsed = consultar_visao_externa(info["mime"], info["b64"])
+async def analisar_imagem_ia(caminho: Path):
+    info = await asyncio.to_thread(inspecionar_imagem, caminho)
+    parsed = await consultar_visao_externa(info["mime"], info["b64"])
 
     if not parsed:
         return analise_visual_fallback(info)
 
     arma_fogo = bool(parsed.get("arma_fogo", False))
     arma_branca = bool(parsed.get("arma_branca", False))
+    atitude_ameaca = bool(parsed.get("atitude_ameaca", False))
+    objeto_mao = sanitizar_texto_operacional(str(parsed.get("objeto_na_mao") or "").strip())
+
     try:
         pessoas = max(0, int(parsed.get("pessoas_visiveis", 0) or 0))
     except Exception:
         pessoas = 0
 
     objetos = []
+    if objeto_mao:
+        objetos.append({
+            "rotulo": objeto_mao,
+            "confianca": "",
+            "detalhe": "Objeto empunhado/segurado na mao"
+        })
+
     if isinstance(parsed.get("objetos"), list):
         for item in parsed.get("objetos"):
             if isinstance(item, dict):
@@ -398,7 +419,7 @@ def analisar_imagem_ia(caminho: Path):
                         conf_txt = f"{round(c_val, 1)}%"
                 except Exception:
                     conf_txt = ""
-                if rotulo:
+                if rotulo and not any(o["rotulo"].lower() == rotulo.lower() for o in objetos):
                     objetos.append({"rotulo": rotulo, "confianca": conf_txt, "detalhe": det})
 
     relato = sanitizar_texto_operacional(
@@ -409,20 +430,27 @@ def analisar_imagem_ia(caminho: Path):
         sintese = relato[:220]
 
     pontos = []
+    if objeto_mao:
+        pontos.append(f"Objeto na mao: {objeto_mao}")
+    if atitude_ameaca:
+        pontos.append("Atitude de ameaca / postura agressiva ou suspeita")
     if isinstance(parsed.get("pontos_atencao"), list):
         for p in parsed.get("pontos_atencao"):
             sp = sanitizar_texto_operacional(str(p))
-            if sp:
+            if sp and sp not in pontos:
                 pontos.append(sp)
     if not pontos:
         pontos = list(info.get("obs") or ["Cena avaliada"])
 
     nivel_ia = str(parsed.get("nivel_sugerido") or "").strip().upper()
-    if arma_fogo:
-        status = "ARMA_DE_FOGO_IDENTIFICADA"
+    if arma_fogo or (atitude_ameaca and (arma_branca or bool(objeto_mao))):
+        status = "ARMA_DE_FOGO_IDENTIFICADA" if arma_fogo else "AMEACA_COM_OBJETO_IDENTIFICADA"
         nivel = "ALTO_RISCO" if nivel_ia not in ("ATENCAO_ELEVADA", "ALTO_RISCO") else nivel_ia
     elif arma_branca:
         status = "ARMA_BRANCA_IDENTIFICADA"
+        nivel = "ATENCAO_ELEVADA" if nivel_ia not in ("OBSERVACAO", "ATENCAO_ELEVADA", "ALTO_RISCO") else nivel_ia
+    elif atitude_ameaca:
+        status = "ATITUDE_DE_AMEACA_IDENTIFICADA"
         nivel = "ATENCAO_ELEVADA" if nivel_ia not in ("OBSERVACAO", "ATENCAO_ELEVADA", "ALTO_RISCO") else nivel_ia
     else:
         status = "ANALISE_VISUAL_CONCLUIDA"
@@ -440,14 +468,14 @@ def analisar_imagem_ia(caminho: Path):
     }
 
 
-def avancar_ciclo():
+async def avancar_ciclo():
     imagens = listar_imagens()
     if not imagens:
         return
     STATE["indice"] = (STATE["indice"] + 1) % len(imagens)
     arq = imagens[STATE["indice"]]
     agora = agora_br()
-    analise = analisar_imagem_ia(arq)
+    analise = await analisar_imagem_ia(arq)
 
     oc = {
         "id": f"OC-{agora.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4].upper()}",
@@ -496,11 +524,11 @@ async def simular_retorno_bravo_demo(oc_id: str):
 
 async def loop_autonomo():
     if STATE["atual"] is None:
-        avancar_ciclo()
+        await avancar_ciclo()
     while True:
         await asyncio.sleep(1)
         if not STATE["pausado"] and (time.time() - STATE["ultima_troca"]) >= INTERVALO_SEG:
-            avancar_ciclo()
+            await avancar_ciclo()
 
 
 @app.on_event("startup")
@@ -575,9 +603,8 @@ async def arquivar(req: Request):
     for o in STATE["historico"]:
         if o["id"] == oc_id:
             o["situacao_fluxo"] = "ARQUIVADA"
-    ativas_restantes = [o for o in STATE["historico"] if o.get("situacao_fluxo") != "ARQUIVADA"]
     if STATE["atual"] and STATE["atual"]["id"] == oc_id:
-        STATE["atual"] = ativas_restantes[-1] if ativas_restantes else None
+        await avancar_ciclo()
     return {"ok": True}
 
 
