@@ -20,15 +20,22 @@ BASE_DIR = Path(__file__).resolve().parent
 MONITOR_DIR = BASE_DIR / "IMAGENS_MONITOR"
 INTERVALO_SEG = 120
 MODO_DEMO_RETORNO_BRAVO = True
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL_ENV = os.environ.get("GEMINI_MODEL", "").strip()
 
 app = FastAPI(title="GUARDIAO DF-360 — SSPDF")
 
 _MODELOS_CACHE = {
     "lista": [],
-    "expira": 0.0
+    "expira": 0.0,
+    "chave": ""
 }
+
+
+def obter_chave_api() -> str:
+    return os.environ.get("GEMINI_API_KEY", "").strip().strip('"').strip("'")
+
+
+def obter_modelo_env() -> str:
+    return os.environ.get("GEMINI_MODEL", "").strip().strip('"').strip("'")
 
 
 def agora_br() -> datetime:
@@ -158,14 +165,19 @@ def inspecionar_imagem(caminho: Path):
     }
 
 
-def obter_modelos_disponiveis(forcar_atualizacao: bool = False):
+def obter_modelos_disponiveis(chave: str):
     agora = time.time()
-    if not forcar_atualizacao and _MODELOS_CACHE["lista"] and agora < _MODELOS_CACHE["expira"]:
+    if (
+        _MODELOS_CACHE["lista"]
+        and _MODELOS_CACHE["chave"] == chave
+        and agora < _MODELOS_CACHE["expira"]
+    ):
         return _MODELOS_CACHE["lista"]
 
+    modelo_env = obter_modelo_env()
     padrao = [
         m for m in [
-            GEMINI_MODEL_ENV,
+            modelo_env,
             "gemini-2.5-flash",
             "gemini-2.5-flash-lite",
             "gemini-2.0-flash",
@@ -174,11 +186,11 @@ def obter_modelos_disponiveis(forcar_atualizacao: bool = False):
     ]
 
     descobertos = []
-    if GEMINI_API_KEY:
+    if chave:
         for ver in ("v1beta", "v1"):
             try:
                 r = requests.get(
-                    f"https://generativelanguage.googleapis.com/{ver}/models?key={GEMINI_API_KEY}",
+                    f"https://generativelanguage.googleapis.com/{ver}/models?key={chave}",
                     timeout=8
                 )
                 if r.status_code == 200:
@@ -200,10 +212,11 @@ def obter_modelos_disponiveis(forcar_atualizacao: bool = False):
 
     _MODELOS_CACHE["lista"] = ordenados[:6]
     _MODELOS_CACHE["expira"] = agora + 600.0
+    _MODELOS_CACHE["chave"] = chave
     return _MODELOS_CACHE["lista"]
 
 
-def analise_visual_fallback(info: dict):
+def analise_visual_fallback(info: dict, motivo: str = ""):
     objetos = []
     pontos = list(info.get("obs") or [])
     razao = info.get("razao", 1.0)
@@ -249,6 +262,9 @@ def analise_visual_fallback(info: dict):
             "no momento da captura."
         )
 
+    if motivo:
+        pontos.append(f"Diagnostico: {motivo}")
+
     return {
         "status": status,
         "nivel": nivel,
@@ -284,8 +300,13 @@ def extrair_json_robusto(texto: str):
 
 
 def _chamar_visao_sync(mime: str, img_b64: str):
-    if not GEMINI_API_KEY or not img_b64:
-        return None
+    chave = obter_chave_api()
+    if not chave:
+        print("[GUARDIAO] GEMINI_API_KEY nao encontrada no ambiente.", flush=True)
+        return None, "Chave de analise nao configurada"
+    if not img_b64:
+        print("[GUARDIAO] Imagem vazia/sem dados para envio.", flush=True)
+        return None, "Imagem sem dados visuais"
 
     prompt = (
         "Voce e o modulo de analise visual operacional do GUARDIAO DF-360 para apoio decisorio do comando (ALFA / SSPDF). "
@@ -295,7 +316,7 @@ def _chamar_visao_sync(mime: str, img_b64: str):
         "e avalie se a postura/atitude da pessoa indica ameaca, agressao, intimidacao, mira, porte ostensivo ou comportamento suspeito.\n"
         "Informe com precisao factual:\n"
         "1) Quantidade de pessoas visiveis, vestimentas, postura/posicao (em pe, sentada, deitada/caida, em movimento, imovel, apontando, segurando algo) e atitude/ameaca aparente.\n"
-        "2) Objeto na mao de alguem ou presente na cena (especifique o objeto real: arma de fogo/fuzil/pistola, arma branca, carteira, celular, veiculo, etc.).\n"
+        "2) Objeto na mao de alguem ou presente na cena (especifique o objeto real: arma de fogo/fuzil/pistola/revolver, arma branca, carteira, celular, veiculo, etc.).\n"
         "3) Caracteristicas do ambiente/terreno/iluminacao e fatores de risco objetivo visiveis na cena.\n"
         "Responda APENAS com um JSON valido (sem markdown, sem texto fora do JSON):\n"
         "{\n"
@@ -326,26 +347,38 @@ def _chamar_visao_sync(mime: str, img_b64: str):
         }
     }
 
-    modelos = obter_modelos_disponiveis()
+    ultimo_erro = "Sem resposta da visao externa"
+    modelos = obter_modelos_disponiveis(chave)
     for modelo in modelos:
         for ver in ("v1beta", "v1"):
-            url = f"https://generativelanguage.googleapis.com/{ver}/models/{modelo}:generateContent?key={GEMINI_API_KEY}"
+            url = f"https://generativelanguage.googleapis.com/{ver}/models/{modelo}:generateContent?key={chave}"
             try:
-                resp = requests.post(url, json=payload, timeout=16)
+                resp = requests.post(url, json=payload, timeout=18)
                 if resp.status_code == 404:
+                    ultimo_erro = f"Modelo {modelo} indisponivel ({ver})"
                     continue
-                if resp.status_code in (429, 500, 502, 503, 504):
+                if resp.status_code in (400, 401, 403):
+                    msg = f"Falha de autorizacao/chave (HTTP {resp.status_code})"
+                    print(f"[GUARDIAO] {msg} em {modelo} ({ver}): {resp.text[:180]}", flush=True)
+                    return None, msg
+                if resp.status_code == 429:
+                    ultimo_erro = "Limite de requisicoes atingido (HTTP 429)"
+                    print(f"[GUARDIAO] {ultimo_erro} em {modelo}", flush=True)
+                    break
+                if resp.status_code in (500, 502, 503, 504):
+                    ultimo_erro = f"Instabilidade temporaria (HTTP {resp.status_code})"
                     break
                 resp.raise_for_status()
                 data = resp.json()
                 candidatos = data.get("candidates") or []
                 if not candidatos:
+                    ultimo_erro = "Resposta sem candidatos"
                     continue
                 partes = (candidatos[0].get("content") or {}).get("parts") or []
                 texto_resp = "".join(str(p.get("text", "")) for p in partes if isinstance(p, dict)).strip()
                 parsed = extrair_json_robusto(texto_resp)
                 if parsed is not None:
-                    return parsed
+                    return parsed, ""
                 if texto_resp:
                     return {
                         "arma_fogo": False,
@@ -358,10 +391,14 @@ def _chamar_visao_sync(mime: str, img_b64: str):
                         "sintese_operacional": texto_resp[:220],
                         "relato_detalhado": texto_resp,
                         "pontos_atencao": []
-                    }
-            except Exception:
+                    }, ""
+            except Exception as exc:
+                ultimo_erro = f"Erro de conexao: {type(exc).__name__}"
+                print(f"[GUARDIAO] Falha em {modelo} ({ver}): {exc}", flush=True)
                 continue
-    return None
+
+    print(f"[GUARDIAO] Fallback acionado: {ultimo_erro}", flush=True)
+    return None, ultimo_erro
 
 
 async def consultar_visao_externa(mime: str, img_b64: str):
@@ -381,10 +418,10 @@ def sanitizar_texto_operacional(txt: str) -> str:
 
 async def analisar_imagem_ia(caminho: Path):
     info = await asyncio.to_thread(inspecionar_imagem, caminho)
-    parsed = await consultar_visao_externa(info["mime"], info["b64"])
+    parsed, motivo_erro = await consultar_visao_externa(info["mime"], info["b64"])
 
     if not parsed:
-        return analise_visual_fallback(info)
+        return analise_visual_fallback(info, motivo_erro)
 
     arma_fogo = bool(parsed.get("arma_fogo", False))
     arma_branca = bool(parsed.get("arma_branca", False))
