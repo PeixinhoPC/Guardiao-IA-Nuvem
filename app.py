@@ -39,7 +39,8 @@ TERMOS_BLOQUEADOS_VISAO = (
     "lyria",
     "robotics",
     "computer-use",
-    "aqa"
+    "aqa",
+    "latest"
 )
 
 
@@ -417,6 +418,7 @@ def _chamar_visao_sync(mime: str, img_b64: str):
                     resp = requests.post(url, json=payload, timeout=18)
                     if resp.status_code == 404:
                         ultimo_erro = f"Modelo {modelo} indisponivel ({ver})"
+                        print(f"[GUARDIAO] {ultimo_erro}", flush=True)
                         break
                     if resp.status_code in (400, 401, 403):
                         msg = f"Falha de autorizacao/chave (HTTP {resp.status_code})"
@@ -424,6 +426,7 @@ def _chamar_visao_sync(mime: str, img_b64: str):
                         return None, msg
                     if resp.status_code in (429, 500, 502, 503, 504):
                         ultimo_erro = f"Instabilidade temporaria (HTTP {resp.status_code})"
+                        print(f"[GUARDIAO] {ultimo_erro} em {modelo} ({ver}) tentativa {tentativa + 1}", flush=True)
                         if tentativa == 0:
                             time.sleep(1.5)
                             continue
@@ -438,8 +441,10 @@ def _chamar_visao_sync(mime: str, img_b64: str):
                     texto_resp = "".join(str(p.get("text", "")) for p in partes if isinstance(p, dict)).strip()
                     parsed = extrair_json_robusto(texto_resp)
                     if parsed is not None:
+                        print(f"[GUARDIAO] Analise concluida via {modelo} ({ver}).", flush=True)
                         return parsed, ""
                     if texto_resp:
+                        print(f"[GUARDIAO] Resposta em texto livre via {modelo} ({ver}).", flush=True)
                         return {
                             "arma_fogo": False,
                             "arma_branca": False,
