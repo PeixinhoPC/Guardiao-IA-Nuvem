@@ -29,6 +29,19 @@ _MODELOS_CACHE = {
     "chave": ""
 }
 
+TERMOS_BLOQUEADOS_VISAO = (
+    "tts",
+    "audio",
+    "live",
+    "embedding",
+    "imagen",
+    "veo",
+    "lyria",
+    "robotics",
+    "computer-use",
+    "aqa"
+)
+
 
 def obter_chave_api() -> str:
     for nome in ("GUARDIAO_CHAVE_VISAO", "GUARDIAO_API_KEY", "GEMINI_API_KEY"):
@@ -41,9 +54,14 @@ def obter_chave_api() -> str:
 def obter_modelo_env() -> str:
     for nome in ("GUARDIAO_MODELO_VISAO", "GUARDIAO_MODEL", "GEMINI_MODEL"):
         val = os.environ.get(nome, "").strip().strip('"').strip("'")
-        if val:
+        if val and not _modelo_bloqueado(val):
             return val
     return ""
+
+
+def _modelo_bloqueado(nome: str) -> bool:
+    n = (nome or "").lower()
+    return any(t in n for t in TERMOS_BLOQUEADOS_VISAO)
 
 
 def agora_br() -> datetime:
@@ -224,7 +242,7 @@ def obter_modelos_disponiveis(chave: str):
             "gemini-2.5-flash-lite",
             "gemini-2.0-flash",
             "gemini-1.5-flash"
-        ] if m
+        ] if m and not _modelo_bloqueado(m)
     ]
 
     descobertos = []
@@ -240,7 +258,7 @@ def obter_modelos_disponiveis(chave: str):
                         nome = str(item.get("name") or "").replace("models/", "").strip()
                         metodos = item.get("supportedGenerationMethods") or []
                         if nome and ("generateContent" in metodos or not metodos):
-                            if "gemini" in nome.lower() and nome not in descobertos:
+                            if "gemini" in nome.lower() and not _modelo_bloqueado(nome) and nome not in descobertos:
                                 descobertos.append(nome)
                     if descobertos:
                         break
@@ -249,7 +267,7 @@ def obter_modelos_disponiveis(chave: str):
 
     ordenados = []
     for m in padrao + descobertos:
-        if m not in ordenados:
+        if m and not _modelo_bloqueado(m) and m not in ordenados:
             ordenados.append(m)
 
     _MODELOS_CACHE["lista"] = ordenados[:6]
