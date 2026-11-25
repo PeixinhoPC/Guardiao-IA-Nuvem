@@ -45,7 +45,8 @@ TERMOS_BLOQUEADOS_VISAO = (
     "-pro",
     "preview",
     "3.1",
-    "1.5"
+    "1.5",
+    "2.0"
 )
 
 
@@ -245,9 +246,7 @@ def obter_modelos_disponiveis(chave: str):
         m for m in [
             modelo_env,
             "gemini-2.5-flash",
-            "gemini-2.5-flash-lite",
-            "gemini-2.0-flash",
-            "gemini-2.0-flash-lite"
+            "gemini-2.5-flash-lite"
         ] if m and not _modelo_bloqueado(m)
     ]
 
@@ -264,7 +263,7 @@ def obter_modelos_disponiveis(chave: str):
                         nome = str(item.get("name") or "").replace("models/", "").strip()
                         metodos = item.get("supportedGenerationMethods") or []
                         if nome and ("generateContent" in metodos or not metodos):
-                            if "gemini" in nome.lower() and not _modelo_bloqueado(nome) and nome not in descobertos:
+                            if nome.startswith("gemini-2.5-") and not _modelo_bloqueado(nome) and nome not in descobertos:
                                 descobertos.append(nome)
                     if descobertos:
                         break
@@ -276,8 +275,7 @@ def obter_modelos_disponiveis(chave: str):
         if m and not _modelo_bloqueado(m) and m not in ordenados:
             ordenados.append(m)
 
-    prioritarios = [m for m in ordenados if m.startswith(("gemini-2.5-", "gemini-2.0-"))]
-    _MODELOS_CACHE["lista"] = (prioritarios or ordenados)[:4]
+    _MODELOS_CACHE["lista"] = ordenados[:3]
     _MODELOS_CACHE["expira"] = agora + 900.0
     _MODELOS_CACHE["chave"] = chave
     return _MODELOS_CACHE["lista"]
@@ -422,13 +420,14 @@ def _chamar_visao_sync(mime: str, img_b64: str):
             url = f"https://generativelanguage.googleapis.com/{ver}/models/{modelo}:generateContent?key={chave}"
             for tentativa in range(2):
                 try:
-                    resp = requests.post(url, json=payload, timeout=14)
+                    resp = requests.post(url, json=payload, timeout=15)
                     if resp.status_code == 404:
                         ultimo_erro = f"Modelo {modelo} indisponivel ({ver})"
+                        print(f"[GUARDIAO] {ultimo_erro}", flush=True)
                         break
                     if resp.status_code in (400, 401, 403):
                         msg = f"Falha de autorizacao/chave (HTTP {resp.status_code})"
-                        print(f"[GUARDIAO] {msg} em {modelo} ({ver}): {resp.text[:160]}", flush=True)
+                        print(f"[GUARDIAO] {msg} em {modelo} ({ver}): {resp.text[:180]}", flush=True)
                         return None, msg
                     if resp.status_code == 429:
                         ultimo_erro = "Cota/requisicoes limitadas no momento (HTTP 429)"
