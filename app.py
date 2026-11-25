@@ -44,7 +44,8 @@ TERMOS_BLOQUEADOS_VISAO = (
     "latest",
     "-pro",
     "preview",
-    "3.1"
+    "3.1",
+    "1.5"
 )
 
 
@@ -246,8 +247,7 @@ def obter_modelos_disponiveis(chave: str):
             "gemini-2.5-flash",
             "gemini-2.5-flash-lite",
             "gemini-2.0-flash",
-            "gemini-2.0-flash-lite",
-            "gemini-1.5-flash"
+            "gemini-2.0-flash-lite"
         ] if m and not _modelo_bloqueado(m)
     ]
 
@@ -276,8 +276,8 @@ def obter_modelos_disponiveis(chave: str):
         if m and not _modelo_bloqueado(m) and m not in ordenados:
             ordenados.append(m)
 
-    prioritarios = [m for m in ordenados if m.startswith(("gemini-2.5-", "gemini-2.0-", "gemini-1.5-"))]
-    _MODELOS_CACHE["lista"] = (prioritarios or ordenados)[:5]
+    prioritarios = [m for m in ordenados if m.startswith(("gemini-2.5-", "gemini-2.0-"))]
+    _MODELOS_CACHE["lista"] = (prioritarios or ordenados)[:4]
     _MODELOS_CACHE["expira"] = agora + 900.0
     _MODELOS_CACHE["chave"] = chave
     return _MODELOS_CACHE["lista"]
