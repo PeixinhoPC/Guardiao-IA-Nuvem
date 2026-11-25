@@ -412,51 +412,55 @@ def _chamar_visao_sync(mime: str, img_b64: str):
     for modelo in modelos:
         for ver in ("v1beta", "v1"):
             url = f"https://generativelanguage.googleapis.com/{ver}/models/{modelo}:generateContent?key={chave}"
-            try:
-                resp = requests.post(url, json=payload, timeout=18)
-                if resp.status_code == 404:
-                    ultimo_erro = f"Modelo {modelo} indisponivel ({ver})"
-                    continue
-                if resp.status_code in (400, 401, 403):
-                    msg = f"Falha de autorizacao/chave (HTTP {resp.status_code})"
-                    print(f"[GUARDIAO] {msg} em {modelo} ({ver}): {resp.text[:180]}", flush=True)
-                    return None, msg
-                if resp.status_code == 429:
-                    ultimo_erro = "Limite de requisicoes atingido (HTTP 429)"
-                    print(f"[GUARDIAO] {ultimo_erro} em {modelo}", flush=True)
+            for tentativa in range(2):
+                try:
+                    resp = requests.post(url, json=payload, timeout=18)
+                    if resp.status_code == 404:
+                        ultimo_erro = f"Modelo {modelo} indisponivel ({ver})"
+                        break
+                    if resp.status_code in (400, 401, 403):
+                        msg = f"Falha de autorizacao/chave (HTTP {resp.status_code})"
+                        print(f"[GUARDIAO] {msg} em {modelo} ({ver}): {resp.text[:180]}", flush=True)
+                        return None, msg
+                    if resp.status_code in (429, 500, 502, 503, 504):
+                        ultimo_erro = f"Instabilidade temporaria (HTTP {resp.status_code})"
+                        if tentativa == 0:
+                            time.sleep(1.5)
+                            continue
+                        break
+                    resp.raise_for_status()
+                    data = resp.json()
+                    candidatos = data.get("candidates") or []
+                    if not candidatos:
+                        ultimo_erro = "Resposta sem candidatos"
+                        break
+                    partes = (candidatos[0].get("content") or {}).get("parts") or []
+                    texto_resp = "".join(str(p.get("text", "")) for p in partes if isinstance(p, dict)).strip()
+                    parsed = extrair_json_robusto(texto_resp)
+                    if parsed is not None:
+                        return parsed, ""
+                    if texto_resp:
+                        return {
+                            "arma_fogo": False,
+                            "arma_branca": False,
+                            "atitude_ameaca": False,
+                            "objeto_na_mao": "",
+                            "pessoas_visiveis": 0,
+                            "nivel_sugerido": "OBSERVACAO",
+                            "objetos": [],
+                            "sintese_operacional": texto_resp[:220],
+                            "relato_detalhado": texto_resp,
+                            "pontos_atencao": [],
+                            "caixa_arma": None
+                        }, ""
                     break
-                if resp.status_code in (500, 502, 503, 504):
-                    ultimo_erro = f"Instabilidade temporaria (HTTP {resp.status_code})"
+                except Exception as exc:
+                    ultimo_erro = f"Erro de conexao: {type(exc).__name__}"
+                    print(f"[GUARDIAO] Falha em {modelo} ({ver}): {exc}", flush=True)
+                    if tentativa == 0:
+                        time.sleep(1.0)
+                        continue
                     break
-                resp.raise_for_status()
-                data = resp.json()
-                candidatos = data.get("candidates") or []
-                if not candidatos:
-                    ultimo_erro = "Resposta sem candidatos"
-                    continue
-                partes = (candidatos[0].get("content") or {}).get("parts") or []
-                texto_resp = "".join(str(p.get("text", "")) for p in partes if isinstance(p, dict)).strip()
-                parsed = extrair_json_robusto(texto_resp)
-                if parsed is not None:
-                    return parsed, ""
-                if texto_resp:
-                    return {
-                        "arma_fogo": False,
-                        "arma_branca": False,
-                        "atitude_ameaca": False,
-                        "objeto_na_mao": "",
-                        "pessoas_visiveis": 0,
-                        "nivel_sugerido": "OBSERVACAO",
-                        "objetos": [],
-                        "sintese_operacional": texto_resp[:220],
-                        "relato_detalhado": texto_resp,
-                        "pontos_atencao": [],
-                        "caixa_arma": None
-                    }, ""
-            except Exception as exc:
-                ultimo_erro = f"Erro de conexao: {type(exc).__name__}"
-                print(f"[GUARDIAO] Falha em {modelo} ({ver}): {exc}", flush=True)
-                continue
 
     print(f"[GUARDIAO] Fallback acionado: {ultimo_erro}", flush=True)
     return None, ultimo_erro
