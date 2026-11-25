@@ -43,7 +43,8 @@ TERMOS_BLOQUEADOS_VISAO = (
     "aqa",
     "latest",
     "-pro",
-    "preview"
+    "preview",
+    "3.1"
 )
 
 
@@ -276,8 +277,7 @@ def obter_modelos_disponiveis(chave: str):
             ordenados.append(m)
 
     prioritarios = [m for m in ordenados if m.startswith(("gemini-2.5-", "gemini-2.0-", "gemini-1.5-"))]
-    restantes = [m for m in ordenados if m not in prioritarios]
-    _MODELOS_CACHE["lista"] = (prioritarios + restantes)[:6]
+    _MODELOS_CACHE["lista"] = (prioritarios or ordenados)[:5]
     _MODELOS_CACHE["expira"] = agora + 900.0
     _MODELOS_CACHE["chave"] = chave
     return _MODELOS_CACHE["lista"]
