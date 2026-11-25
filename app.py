@@ -12,8 +12,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 import requests
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
-from PIL import Image, ImageFilter, ImageStat
+from fastapi.responses import HTMLResponse, JSONResponse, Response
+from PIL import Image, ImageDraw, ImageFilter, ImageStat
 
 TZ_BR = ZoneInfo("America/Sao_Paulo")
 BASE_DIR = Path(__file__).resolve().parent
@@ -31,11 +31,19 @@ _MODELOS_CACHE = {
 
 
 def obter_chave_api() -> str:
-    return os.environ.get("GEMINI_API_KEY", "").strip().strip('"').strip("'")
+    for nome in ("GUARDIAO_CHAVE_VISAO", "GUARDIAO_API_KEY", "GEMINI_API_KEY"):
+        val = os.environ.get(nome, "").strip().strip('"').strip("'")
+        if val:
+            return val
+    return ""
 
 
 def obter_modelo_env() -> str:
-    return os.environ.get("GEMINI_MODEL", "").strip().strip('"').strip("'")
+    for nome in ("GUARDIAO_MODELO_VISAO", "GUARDIAO_MODEL", "GEMINI_MODEL"):
+        val = os.environ.get(nome, "").strip().strip('"').strip("'")
+        if val:
+            return val
+    return ""
 
 
 def agora_br() -> datetime:
@@ -165,6 +173,40 @@ def inspecionar_imagem(caminho: Path):
     }
 
 
+def desenhar_retangulo_arma(caminho: Path, caixa, rotulo: str = "ARMA") -> bytes:
+    with Image.open(caminho) as im:
+        im_rgb = im.convert("RGB")
+        w, h = im_rgb.size
+        draw = ImageDraw.Draw(im_rgb)
+
+        x1 = y1 = x2 = y2 = None
+        if isinstance(caixa, (list, tuple)) and len(caixa) == 4:
+            vals = [float(v) for v in caixa]
+            if max(vals) <= 1.0:
+                ymin, xmin, ymax, xmax = vals[0] * h, vals[1] * w, vals[2] * h, vals[3] * w
+            elif max(vals) <= 1000.0:
+                ymin, xmin, ymax, xmax = (vals[0] / 1000.0) * h, (vals[1] / 1000.0) * w, (vals[2] / 1000.0) * h, (vals[3] / 1000.0) * w
+            else:
+                xmin, ymin, xmax, ymax = vals
+            x1 = max(0, min(w - 1, int(round(min(xmin, xmax)))))
+            y1 = max(0, min(h - 1, int(round(min(ymin, ymax)))))
+            x2 = max(0, min(w - 1, int(round(max(xmin, xmax)))))
+            y2 = max(0, min(h - 1, int(round(max(ymin, ymax)))))
+
+        if x1 is not None and x2 > x1 and y2 > y1:
+            espessura = max(3, int(round(min(w, h) * 0.008)))
+            for i in range(espessura):
+                draw.rectangle([x1 - i, y1 - i, x2 + i, y2 + i], outline=(255, 30, 30))
+            texto = (rotulo or "ARMA").upper()[:28]
+            box_topo = max(0, y1 - 22)
+            draw.rectangle([x1, box_topo, min(w - 1, x1 + max(70, len(texto) * 8)), box_topo + 20], fill=(220, 38, 38))
+            draw.text((x1 + 5, box_topo + 4), texto, fill=(255, 255, 255))
+
+        buf = BytesIO()
+        im_rgb.save(buf, format="JPEG", quality=88)
+        return buf.getvalue()
+
+
 def obter_modelos_disponiveis(chave: str):
     agora = time.time()
     if (
@@ -273,7 +315,9 @@ def analise_visual_fallback(info: dict, motivo: str = ""):
         "sintese_operacional": sintese,
         "relato_visual": relato,
         "pontos_atencao": pontos or ["Monitoramento continuo em curso"],
-        "detalhes_cena": info["detalhes"]
+        "detalhes_cena": info["detalhes"],
+        "caixa_arma": None,
+        "rotulo_arma": ""
     }
 
 
@@ -302,7 +346,7 @@ def extrair_json_robusto(texto: str):
 def _chamar_visao_sync(mime: str, img_b64: str):
     chave = obter_chave_api()
     if not chave:
-        print("[GUARDIAO] GEMINI_API_KEY nao encontrada no ambiente.", flush=True)
+        print("[GUARDIAO] Chave de visao nao encontrada no ambiente.", flush=True)
         return None, "Chave de analise nao configurada"
     if not img_b64:
         print("[GUARDIAO] Imagem vazia/sem dados para envio.", flush=True)
@@ -310,14 +354,11 @@ def _chamar_visao_sync(mime: str, img_b64: str):
 
     prompt = (
         "Voce e o modulo de analise visual operacional do GUARDIAO DF-360 para apoio decisorio do comando (ALFA / SSPDF). "
-        "Analise EXCLUSIVAMENTE o que esta visivel na imagem (ignore completamente o nome do arquivo). "
-        "Prioridade maxima: identifique de imediato qualquer objeto empunhado ou segurado na mao de alguem "
-        "(arma de fogo, pistola, revolver, fuzil, carabina, espingarda, faca, canivete, objeto contundente, celular, carteira, pacote etc.) "
-        "e avalie se a postura/atitude da pessoa indica ameaca, agressao, intimidacao, mira, porte ostensivo ou comportamento suspeito.\n"
-        "Informe com precisao factual:\n"
-        "1) Quantidade de pessoas visiveis, vestimentas, postura/posicao (em pe, sentada, deitada/caida, em movimento, imovel, apontando, segurando algo) e atitude/ameaca aparente.\n"
-        "2) Objeto na mao de alguem ou presente na cena (especifique o objeto real: arma de fogo/fuzil/pistola/revolver, arma branca, carteira, celular, veiculo, etc.).\n"
-        "3) Caracteristicas do ambiente/terreno/iluminacao e fatores de risco objetivo visiveis na cena.\n"
+        "Descreva com precisao extrema e fidelidade absoluta o que esta visivel na imagem (ignore completamente o nome do arquivo).\n"
+        "Detalhe sempre:\n"
+        "1) Pessoas visiveis: quantidade, vestimentas/farda (ex.: farda policial/militar, traje civil, roupa escura), postura/posicao (em pe, sentada, apontando para cima/frente, mao proxima ao coldre, etc.) e proximidade/relacao com outras pessoas na cena.\n"
+        "2) Armas e objetos: especifique se ha arma de fogo (pistola, revolver, fuzil, carabina, espingarda) ou arma branca, onde esta (dentro do coldre na cintura, empunhada, apontada para cima/alguem, cao/gatilho aparente) e outros objetos na mao ou na cena.\n"
+        "3) Se houver arma de fogo ou arma branca visivel na cena, informe em 'caixa_arma' as coordenadas normalizadas de 0 a 1000 no formato [ymin, xmin, ymax, xmax] delimitando a arma.\n"
         "Responda APENAS com um JSON valido (sem markdown, sem texto fora do JSON):\n"
         "{\n"
         '  "arma_fogo": bool,\n'
@@ -327,11 +368,12 @@ def _chamar_visao_sync(mime: str, img_b64: str):
         '  "pessoas_visiveis": int,\n'
         '  "nivel_sugerido": "NORMAL" | "OBSERVACAO" | "ATENCAO_ELEVADA" | "ALTO_RISCO",\n'
         '  "objetos": [{"rotulo": "string", "confianca": 0-100, "detalhe": "string"}],\n'
-        '  "sintese_operacional": "string direta com os fatos criticos, objeto na mao e atitude para decisao do ALFA",\n'
-        '  "relato_detalhado": "string completa e fiel descrevendo pessoas, postura/atitude, objeto na mao, objetos/armas e ambiente",\n'
-        '  "pontos_atencao": ["string"]\n'
+        '  "sintese_operacional": "string direta com os fatos criticos, arma/coldre/mira, pessoas e atitude para decisao do ALFA",\n'
+        '  "relato_detalhado": "string completa e fiel descrevendo pessoas, vestimenta/farda, postura, arma (coldre, mao, direcao da mira), proximidade de terceiros e ambiente",\n'
+        '  "pontos_atencao": ["string"],\n'
+        '  "caixa_arma": [ymin, xmin, ymax, xmax] ou null\n'
         "}\n"
-        "Seja objetivo e factual. Nao mencione tecnologia, modelos, APIs ou plataformas."
+        "Seja claro, objetivo e fiel ao que se ve. Nao mencione tecnologia, modelos, APIs ou plataformas."
     )
 
     payload = {
@@ -390,7 +432,8 @@ def _chamar_visao_sync(mime: str, img_b64: str):
                         "objetos": [],
                         "sintese_operacional": texto_resp[:220],
                         "relato_detalhado": texto_resp,
-                        "pontos_atencao": []
+                        "pontos_atencao": [],
+                        "caixa_arma": None
                     }, ""
             except Exception as exc:
                 ultimo_erro = f"Erro de conexao: {type(exc).__name__}"
@@ -409,7 +452,7 @@ def sanitizar_texto_operacional(txt: str) -> str:
     if not txt:
         return ""
     limpo = re.sub(
-        r"(?i)\b(gemini|google\s*ai\s*studio|generativelanguage|render|gemini_api_key|sem_chave_ia_configurada)\b",
+        r"(?i)\b(gemini|google\s*ai\s*studio|generativelanguage|render|gemini_api_key|guardiao_chave_visao|sem_chave_ia_configurada)\b",
         "sensor visual",
         txt
     )
@@ -493,6 +536,11 @@ async def analisar_imagem_ia(caminho: Path):
         status = "ANALISE_VISUAL_CONCLUIDA"
         nivel = nivel_ia if nivel_ia in ("NORMAL", "OBSERVACAO", "ATENCAO_ELEVADA", "ALTO_RISCO") else "NORMAL"
 
+    caixa_arma = parsed.get("caixa_arma")
+    rotulo_arma = ""
+    if arma_fogo or arma_branca or caixa_arma:
+        rotulo_arma = objeto_mao or (objetos[0]["rotulo"] if objetos else ("ARMA DE FOGO" if arma_fogo else "ARMA BRANCA"))
+
     return {
         "status": status,
         "nivel": nivel,
@@ -501,7 +549,9 @@ async def analisar_imagem_ia(caminho: Path):
         "sintese_operacional": sintese,
         "relato_visual": relato,
         "pontos_atencao": pontos,
-        "detalhes_cena": info["detalhes"]
+        "detalhes_cena": info["detalhes"],
+        "caixa_arma": caixa_arma,
+        "rotulo_arma": rotulo_arma
     }
 
 
@@ -575,8 +625,22 @@ async def on_startup():
 
 @app.get("/imagem")
 async def get_imagem():
-    if STATE["atual"] and Path(STATE["atual"]["caminho"]).exists():
-        return FileResponse(STATE["atual"]["caminho"])
+    oc = STATE["atual"]
+    if oc and Path(oc["caminho"]).exists():
+        caminho = Path(oc["caminho"])
+        if oc.get("caixa_arma"):
+            try:
+                img_bytes = await asyncio.to_thread(
+                    desenhar_retangulo_arma,
+                    caminho,
+                    oc.get("caixa_arma"),
+                    oc.get("rotulo_arma") or "ARMA"
+                )
+                return Response(content=img_bytes, media_type="image/jpeg")
+            except Exception:
+                pass
+        media = "image/png" if caminho.suffix.lower() == ".png" else ("image/webp" if caminho.suffix.lower() == ".webp" else "image/jpeg")
+        return Response(content=caminho.read_bytes(), media_type=media)
     return JSONResponse({"erro": "Sem imagem"}, status_code=404)
 
 
