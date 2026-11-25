@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import base64
 import json
 import os
@@ -27,6 +27,11 @@ _MODELOS_CACHE = {
     "lista": [],
     "expira": 0.0,
     "chave": ""
+}
+
+_MODELOS_INDISPONIVEIS = {
+    "pares": set(),
+    "expira": 0.0
 }
 
 TERMOS_BLOQUEADOS_VISAO = (
@@ -63,6 +68,23 @@ def obter_modelo_env() -> str:
 def _modelo_bloqueado(nome: str) -> bool:
     n = (nome or "").lower()
     return any(t in n for t in TERMOS_BLOQUEADOS_VISAO)
+
+
+def _limpar_indisponiveis_se_expirado():
+    agora = time.time()
+    if agora >= _MODELOS_INDISPONIVEIS["expira"]:
+        _MODELOS_INDISPONIVEIS["pares"].clear()
+        _MODELOS_INDISPONIVEIS["expira"] = agora + 900.0
+
+
+def _marcar_modelo_indisponivel(modelo: str, ver: str):
+    _limpar_indisponiveis_se_expirado()
+    _MODELOS_INDISPONIVEIS["pares"].add((modelo, ver))
+    if _MODELOS_CACHE["lista"]:
+        _MODELOS_CACHE["lista"] = [
+            item for item in _MODELOS_CACHE["lista"]
+            if item != (modelo, ver)
+        ]
 
 
 def agora_br() -> datetime:
@@ -227,13 +249,14 @@ def desenhar_retangulo_arma(caminho: Path, caixa, rotulo: str = "ARMA") -> bytes
 
 
 def obter_modelos_disponiveis(chave: str):
+    _limpar_indisponiveis_se_expirado()
     agora = time.time()
     if (
         _MODELOS_CACHE["lista"]
         and _MODELOS_CACHE["chave"] == chave
         and agora < _MODELOS_CACHE["expira"]
     ):
-        return _MODELOS_CACHE["lista"]
+        return [p for p in _MODELOS_CACHE["lista"] if p not in _MODELOS_INDISPONIVEIS["pares"]]
 
     descobertos = []
     if chave:
@@ -250,7 +273,7 @@ def obter_modelos_disponiveis(chave: str):
                         if nome and "generateContent" in metodos:
                             if "gemini" in nome.lower() and not _modelo_bloqueado(nome):
                                 par = (nome, ver)
-                                if par not in descobertos:
+                                if par not in descobertos and par not in _MODELOS_INDISPONIVEIS["pares"]:
                                     descobertos.append(par)
                     if descobertos:
                         break
@@ -260,25 +283,31 @@ def obter_modelos_disponiveis(chave: str):
                 print(f"[GUARDIAO] Erro ao listar modelos ({ver}): {type(exc).__name__} — {exc}", flush=True)
 
     modelo_env = obter_modelo_env()
-    fila = []
+    candidatos = []
+
+    for m, ver in descobertos:
+        if "flash-lite" in m and (m, ver) not in candidatos:
+            candidatos.append((m, ver))
 
     if modelo_env:
         for ver in ("v1beta", "v1"):
-            if (modelo_env, ver) not in fila:
-                fila.append((modelo_env, ver))
+            par = (modelo_env, ver)
+            if par not in candidatos and par not in _MODELOS_INDISPONIVEIS["pares"]:
+                candidatos.append(par)
 
-    for nome, ver in descobertos:
-        if (nome, ver) not in fila:
-            fila.append((nome, ver))
+    for par in descobertos:
+        if par not in candidatos:
+            candidatos.append(par)
 
-    if not fila:
-        for m in ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"):
+    if not candidatos:
+        for m in ("gemini-flash-lite-latest", "gemini-2.5-flash", "gemini-2.0-flash"):
             for ver in ("v1beta", "v1"):
-                if (m, ver) not in fila:
-                    fila.append((m, ver))
+                par = (m, ver)
+                if par not in candidatos and par not in _MODELOS_INDISPONIVEIS["pares"]:
+                    candidatos.append(par)
 
-    print(f"[GUARDIAO] Fila de modelos ativa: {fila[:5]}", flush=True)
-    _MODELOS_CACHE["lista"] = fila[:5]
+    print(f"[GUARDIAO] Fila de modelos ativa: {candidatos[:5]}", flush=True)
+    _MODELOS_CACHE["lista"] = candidatos[:5]
     _MODELOS_CACHE["expira"] = agora + 900.0
     _MODELOS_CACHE["chave"] = chave
     return _MODELOS_CACHE["lista"]
@@ -424,6 +453,7 @@ def _chamar_visao_sync(mime: str, img_b64: str):
             try:
                 resp = requests.post(url, json=payload, timeout=15)
                 if resp.status_code == 404:
+                    _marcar_modelo_indisponivel(modelo, ver)
                     ultimo_erro = f"Modelo {modelo} indisponivel ({ver})"
                     print(f"[GUARDIAO] {ultimo_erro}", flush=True)
                     break
@@ -597,7 +627,12 @@ async def avancar_ciclo():
     STATE["indice"] = (STATE["indice"] + 1) % len(imagens)
     arq = imagens[STATE["indice"]]
     agora = agora_br()
-    analise = await analisar_imagem_ia(arq)
+    try:
+        analise = await analisar_imagem_ia(arq)
+    except Exception as exc:
+        print(f"[GUARDIAO] Erro inesperado em {arq.name}: {type(exc).__name__} — {exc}", flush=True)
+        info = await asyncio.to_thread(inspecionar_imagem, arq)
+        analise = analise_visual_fallback(info, f"Falha inesperada: {type(exc).__name__}")
 
     oc = {
         "id": f"OC-{agora.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4].upper()}",
@@ -646,11 +681,19 @@ async def simular_retorno_bravo_demo(oc_id: str):
 
 async def loop_autonomo():
     if STATE["atual"] is None:
-        await avancar_ciclo()
+        try:
+            await avancar_ciclo()
+        except Exception as exc:
+            print(f"[GUARDIAO] Falha no ciclo inicial: {type(exc).__name__} — {exc}", flush=True)
+            STATE["ultima_troca"] = time.time()
     while True:
         await asyncio.sleep(1)
         if not STATE["pausado"] and (time.time() - STATE["ultima_troca"]) >= INTERVALO_SEG:
-            await avancar_ciclo()
+            try:
+                await avancar_ciclo()
+            except Exception as exc:
+                print(f"[GUARDIAO] Falha no loop autonomo: {type(exc).__name__} — {exc}", flush=True)
+                STATE["ultima_troca"] = time.time()
 
 
 @app.on_event("startup")
