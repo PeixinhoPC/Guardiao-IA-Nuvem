@@ -275,7 +275,9 @@ def obter_modelos_disponiveis(chave: str):
         if m and not _modelo_bloqueado(m) and m not in ordenados:
             ordenados.append(m)
 
-    _MODELOS_CACHE["lista"] = ordenados[:6]
+    prioritarios = [m for m in ordenados if m.startswith(("gemini-2.5-", "gemini-2.0-", "gemini-1.5-"))]
+    restantes = [m for m in ordenados if m not in prioritarios]
+    _MODELOS_CACHE["lista"] = (prioritarios + restantes)[:6]
     _MODELOS_CACHE["expira"] = agora + 900.0
     _MODELOS_CACHE["chave"] = chave
     return _MODELOS_CACHE["lista"]
@@ -418,9 +420,9 @@ def _chamar_visao_sync(mime: str, img_b64: str):
     for modelo in modelos:
         for ver in ("v1beta", "v1"):
             url = f"https://generativelanguage.googleapis.com/{ver}/models/{modelo}:generateContent?key={chave}"
-            for tentativa in range(3):
+            for tentativa in range(2):
                 try:
-                    resp = requests.post(url, json=payload, timeout=20)
+                    resp = requests.post(url, json=payload, timeout=14)
                     if resp.status_code == 404:
                         ultimo_erro = f"Modelo {modelo} indisponivel ({ver})"
                         break
@@ -430,13 +432,13 @@ def _chamar_visao_sync(mime: str, img_b64: str):
                         return None, msg
                     if resp.status_code == 429:
                         ultimo_erro = "Cota/requisicoes limitadas no momento (HTTP 429)"
-                        print(f"[GUARDIAO] {ultimo_erro} em {modelo} ({ver}) tentativa {tentativa + 1}/3", flush=True)
-                        time.sleep(2.5 * (tentativa + 1))
+                        print(f"[GUARDIAO] {ultimo_erro} em {modelo} ({ver}) tentativa {tentativa + 1}/2", flush=True)
+                        time.sleep(1.5 * (tentativa + 1))
                         continue
                     if resp.status_code in (500, 502, 503, 504):
                         ultimo_erro = f"Instabilidade temporaria (HTTP {resp.status_code})"
-                        print(f"[GUARDIAO] {ultimo_erro} em {modelo} ({ver}) tentativa {tentativa + 1}/3", flush=True)
-                        time.sleep(1.5 * (tentativa + 1))
+                        print(f"[GUARDIAO] {ultimo_erro} em {modelo} ({ver}) tentativa {tentativa + 1}/2", flush=True)
+                        time.sleep(1.0 * (tentativa + 1))
                         continue
                     resp.raise_for_status()
                     data = resp.json()
@@ -468,8 +470,8 @@ def _chamar_visao_sync(mime: str, img_b64: str):
                     break
                 except Exception as exc:
                     ultimo_erro = f"Erro de conexao: {type(exc).__name__}"
-                    print(f"[GUARDIAO] Falha em {modelo} ({ver}) tentativa {tentativa + 1}/3: {exc}", flush=True)
-                    time.sleep(1.0)
+                    print(f"[GUARDIAO] Falha em {modelo} ({ver}) tentativa {tentativa + 1}/2: {exc}", flush=True)
+                    time.sleep(0.8)
 
     print(f"[GUARDIAO] Fallback acionado: {ultimo_erro}", flush=True)
     return None, ultimo_erro
