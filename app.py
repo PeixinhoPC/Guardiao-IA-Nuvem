@@ -379,8 +379,8 @@ def _chamar_visao_sync(mime: str, img_b64: str):
         "Voce e o modulo de analise visual operacional do GUARDIAO DF-360 para apoio decisorio do comando (ALFA / SSPDF). "
         "Descreva com precisao extrema e fidelidade absoluta o que esta visivel na imagem (ignore completamente o nome do arquivo).\n"
         "Detalhe sempre:\n"
-        "1) Pessoas visiveis: quantidade, vestimentas/farda (ex.: farda policial/militar, traje civil, roupa escura), postura/posicao (em pe, sentada, apontando para cima/frente, mao proxima ao coldre, etc.) e proximidade/relacao com outras pessoas na cena.\n"
-        "2) Armas e objetos: especifique se ha arma de fogo (pistola, revolver, fuzil, carabina, espingarda) ou arma branca, onde esta (dentro do coldre na cintura, empunhada, apontada para cima/alguem, cao/gatilho aparente) e outros objetos na mao ou na cena.\n"
+        "1) Pessoas visiveis: quantidade, vestimentas/farda (ex.: farda policial/militar, traje civil, roupa escura), postura/posicao (em pe, sentada, deitada no chao, aparentemente ferida ou imobilizada, apontando para cima/frente, mao proxima ao coldre, etc.) e proximidade/relacao com outras pessoas na cena.\n"
+        "2) Armas e objetos: especifique se ha arma de fogo longa ou curta (fuzil, carabina, espingarda, pistola, revolver) ou arma branca, onde esta (sobre o corpo/chao, dentro do coldre na cintura, empunhada, apontada para cima/alguem, cao/gatilho aparente) e outros objetos na mao ou na cena.\n"
         "3) Se houver arma de fogo ou arma branca visivel na cena, informe em 'caixa_arma' as coordenadas normalizadas de 0 a 1000 no formato [ymin, xmin, ymax, xmax] delimitando a arma.\n"
         "Responda APENAS com um JSON valido (sem markdown, sem texto fora do JSON):\n"
         "{\n"
@@ -391,8 +391,8 @@ def _chamar_visao_sync(mime: str, img_b64: str):
         '  "pessoas_visiveis": int,\n'
         '  "nivel_sugerido": "NORMAL" | "OBSERVACAO" | "ATENCAO_ELEVADA" | "ALTO_RISCO",\n'
         '  "objetos": [{"rotulo": "string", "confianca": 0-100, "detalhe": "string"}],\n'
-        '  "sintese_operacional": "string direta com os fatos criticos, arma/coldre/mira, pessoas e atitude para decisao do ALFA",\n'
-        '  "relato_detalhado": "string completa e fiel descrevendo pessoas, vestimenta/farda, postura, arma (coldre, mao, direcao da mira), proximidade de terceiros e ambiente",\n'
+        '  "sintese_operacional": "string direta com os fatos criticos, arma/coldre/mira, pessoas (inclusive se deitada ou aparentemente ferida) e atitude para decisao do ALFA",\n'
+        '  "relato_detalhado": "string completa e fiel descrevendo pessoas, vestimenta/farda, postura (em pe, sentada, deitada, aparentemente ferida), arma (coldre, mao, sobre o corpo, direcao da mira), proximidade de terceiros e ambiente",\n'
         '  "pontos_atencao": ["string"],\n'
         '  "caixa_arma": [ymin, xmin, ymax, xmax] ou null\n'
         "}\n"
@@ -509,7 +509,7 @@ async def analisar_imagem_ia(caminho: Path):
         objetos.append({
             "rotulo": objeto_mao,
             "confianca": "",
-            "detalhe": "Objeto empunhado/segurado na mao"
+            "detalhe": "Objeto empunhado/segurado/na cena"
         })
 
     if isinstance(parsed.get("objetos"), list):
@@ -539,7 +539,7 @@ async def analisar_imagem_ia(caminho: Path):
 
     pontos = []
     if objeto_mao:
-        pontos.append(f"Objeto na mao: {objeto_mao}")
+        pontos.append(f"Objeto na mao/cena: {objeto_mao}")
     if atitude_ameaca:
         pontos.append("Atitude de ameaca / postura agressiva ou suspeita")
     if isinstance(parsed.get("pontos_atencao"), list):
@@ -588,11 +588,39 @@ async def avancar_ciclo(forcar_mesma: bool = False):
     imagens = listar_imagens()
     if not imagens:
         return
+    anterior_mesma = None
+    if forcar_mesma and STATE["indice"] >= 0 and STATE["atual"]:
+        anterior_mesma = dict(STATE["atual"])
     if not forcar_mesma or STATE["indice"] < 0:
         STATE["indice"] = (STATE["indice"] + 1) % len(imagens)
     arq = imagens[STATE["indice"]]
     agora = agora_br()
     analise = await analisar_imagem_ia(arq)
+
+    if (
+        forcar_mesma
+        and anterior_mesma
+        and anterior_mesma.get("arquivo") == arq.name
+        and anterior_mesma.get("modo_analise") == "SENSOR_VISUAL"
+        and analise.get("modo_analise") == "CONTINGENCIA_PIXELS"
+    ):
+        analise = {
+            k: anterior_mesma[k]
+            for k in (
+                "modo_analise",
+                "status",
+                "nivel",
+                "pessoas_visiveis",
+                "objetos",
+                "sintese_operacional",
+                "relato_visual",
+                "pontos_atencao",
+                "detalhes_cena",
+                "caixa_arma",
+                "rotulo_arma"
+            )
+            if k in anterior_mesma
+        }
 
     oc = {
         "id": f"OC-{agora.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4].upper()}",
@@ -677,7 +705,6 @@ async def get_imagem():
 @app.get("/api/estado")
 async def api_estado():
     restante = max(0, int(INTERVALO_SEG - (time.time() - STATE["ultima_troca"]))) if not STATE["pausado"] else int(INTERVALO_SEG)
-    ativas = [o for o in STATE["historico"] if o.get("situacao_fluxo") != "ARQUIVADA"]
     arquivadas = [o for o in STATE["historico"] if o.get("situacao_fluxo") == "ARQUIVADA"]
     agora = agora_br()
     return {
@@ -686,7 +713,6 @@ async def api_estado():
         "pausado": STATE["pausado"],
         "modo_demo_retorno": MODO_DEMO_RETORNO_BRAVO,
         "atual": STATE["atual"],
-        "ativas": ativas[-40:],
         "arquivadas": arquivadas[-40:],
         "mensagens": STATE["mensagens"][-40:],
         "retorno_bravo": STATE["retorno_bravo"][-30:]
@@ -816,7 +842,7 @@ img.foto{max-width:100%;width:auto;max-height:270px;border-radius:6px;display:bl
 button{padding:7px 10px;border:none;border-radius:6px;cursor:pointer;font-weight:600;color:#fff;font-size:12px;max-width:100%}
 .b-bravo{background:#dc2626}.b-arq{background:#2563eb}.b-desarq{background:#059669}.b-pausa{background:#475569}.b-env{background:#0284c7}.b-rean{background:#7c3aed}
 input{background:#0b101b;color:#fff;border:1px solid #334155;border-radius:6px;padding:6px;font-size:12px;min-width:0;max-width:100%}
-.box{background:#0b101b;border:1px solid #1e293b;border-radius:6px;padding:8px;max-height:195px;overflow-y:auto;overflow-x:hidden;font-size:12px;overflow-wrap:anywhere;word-break:break-word;max-width:100%}
+.box{background:#0b101b;border:1px solid #1e293b;border-radius:6px;padding:8px;max-height:220px;overflow-y:auto;overflow-x:hidden;font-size:12px;overflow-wrap:anywhere;word-break:break-word;max-width:100%}
 .item{border-bottom:1px solid #1e293b;padding:5px 0}
 .linha-rel{margin-top:4px;line-height:1.35}
 .crit{color:#fca5a5}.med{color:#fcd34d}.seg{color:#86efac}
@@ -843,7 +869,7 @@ input{background:#0b101b;color:#fff;border:1px solid #334155;border-radius:6px;p
     </div>
     <div class="card">
       <h3>RELATORIO SITUACIONAL DO GUARDIAO (DECISAO ALFA)</h3>
-      <div id="relatorio" class="box" style="max-height:240px"></div>
+      <div id="relatorio" class="box" style="max-height:260px"></div>
     </div>
     <div class="card">
       <h3>DESARQUIVAR OCORRENCIA POR PERIODO</h3>
@@ -871,11 +897,7 @@ input{background:#0b101b;color:#fff;border:1px solid #334155;border-radius:6px;p
         <input type="text" id="txtMsg" placeholder="Mensagem do ALFA para o GUARDIAO..." style="flex:1 1 140px">
         <button class="b-env" onclick="enviarMsg()">ENVIAR</button>
       </div>
-      <div id="boxMsg" class="box"></div>
-    </div>
-    <div class="card">
-      <h3>OCORRENCIAS ATIVAS / HISTORICO (ROLAGEM DE BAIXO PARA CIMA)</h3>
-      <div id="boxHist" class="box"></div>
+      <div id="boxMsg" class="box" style="max-height:360px"></div>
     </div>
   </div>
 </div>
@@ -953,15 +975,12 @@ async function atualizar(){
   }
   const boxBravo = document.getElementById("boxBravo");
   const boxMsg = document.getElementById("boxMsg");
-  const boxHist = document.getElementById("boxHist");
   const listaArq = document.getElementById("listaArq");
   boxBravo.innerHTML = (d.retorno_bravo||[]).map(x => "<div class='item'>["+esc(x.hora)+"] <b>"+esc(x.ocorrencia_id)+":</b> "+esc(x.texto)+"</div>").join("");
   boxMsg.innerHTML = (d.mensagens||[]).map(x => "<div class='item'>["+esc(x.hora)+"] <b>"+esc(x.origem)+":</b> "+esc(x.texto)+"</div>").join("");
-  boxHist.innerHTML = (d.ativas||[]).map(x => "<div class='item'><b>"+esc(x.id)+"</b> ("+esc(x.data_hora)+") ["+esc(x.situacao_fluxo)+"] — <b>"+esc(x.nivel)+"</b>: "+esc(x.sintese_operacional || x.relato_visual)+"</div>").join("");
   listaArq.innerHTML = (d.arquivadas||[]).map(x => "<div class='item'>[ARQUIVADA] <b>"+esc(x.id)+"</b> — "+esc(x.data_hora)+" — "+esc(x.arquivo)+"</div>").join("");
   rolarBaixo(boxBravo);
   rolarBaixo(boxMsg);
-  rolarBaixo(boxHist);
   rolarBaixo(listaArq);
 }
 atualizar();
