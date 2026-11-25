@@ -42,7 +42,8 @@ TERMOS_BLOQUEADOS_VISAO = (
     "computer-use",
     "aqa",
     "latest",
-    "-pro"
+    "-pro",
+    "preview"
 )
 
 
@@ -417,56 +418,58 @@ def _chamar_visao_sync(mime: str, img_b64: str):
     for modelo in modelos:
         for ver in ("v1beta", "v1"):
             url = f"https://generativelanguage.googleapis.com/{ver}/models/{modelo}:generateContent?key={chave}"
-            try:
-                resp = requests.post(url, json=payload, timeout=16)
-                if resp.status_code == 404:
-                    ultimo_erro = f"Modelo {modelo} indisponivel ({ver})"
-                    continue
-                if resp.status_code in (400, 401, 403):
-                    msg = f"Falha de autorizacao/chave (HTTP {resp.status_code})"
-                    print(f"[GUARDIAO] {msg} em {modelo} ({ver}): {resp.text[:160]}", flush=True)
-                    return None, msg
-                if resp.status_code == 429:
-                    ultimo_erro = "Cota/requisicoes limitadas no momento (HTTP 429)"
-                    print(f"[GUARDIAO] {ultimo_erro} em {modelo} ({ver})", flush=True)
-                    time.sleep(2.5)
-                    continue
-                if resp.status_code in (500, 502, 503, 504):
-                    ultimo_erro = f"Instabilidade temporaria (HTTP {resp.status_code})"
-                    print(f"[GUARDIAO] {ultimo_erro} em {modelo} ({ver})", flush=True)
-                    time.sleep(1.5)
-                    continue
-                resp.raise_for_status()
-                data = resp.json()
-                candidatos = data.get("candidates") or []
-                if not candidatos:
-                    ultimo_erro = "Resposta sem candidatos"
-                    continue
-                partes = (candidatos[0].get("content") or {}).get("parts") or []
-                texto_resp = "".join(str(p.get("text", "")) for p in partes if isinstance(p, dict)).strip()
-                parsed = extrair_json_robusto(texto_resp)
-                if parsed is not None:
-                    print(f"[GUARDIAO] Analise concluida via {modelo} ({ver}).", flush=True)
-                    return parsed, ""
-                if texto_resp:
-                    print(f"[GUARDIAO] Resposta em texto livre via {modelo} ({ver}).", flush=True)
-                    return {
-                        "arma_fogo": False,
-                        "arma_branca": False,
-                        "atitude_ameaca": False,
-                        "objeto_na_mao": "",
-                        "pessoas_visiveis": 0,
-                        "nivel_sugerido": "OBSERVACAO",
-                        "objetos": [],
-                        "sintese_operacional": texto_resp[:220],
-                        "relato_detalhado": texto_resp,
-                        "pontos_atencao": [],
-                        "caixa_arma": None
-                    }, ""
-            except Exception as exc:
-                ultimo_erro = f"Erro de conexao: {type(exc).__name__}"
-                print(f"[GUARDIAO] Falha em {modelo} ({ver}): {exc}", flush=True)
-                continue
+            for tentativa in range(3):
+                try:
+                    resp = requests.post(url, json=payload, timeout=20)
+                    if resp.status_code == 404:
+                        ultimo_erro = f"Modelo {modelo} indisponivel ({ver})"
+                        break
+                    if resp.status_code in (400, 401, 403):
+                        msg = f"Falha de autorizacao/chave (HTTP {resp.status_code})"
+                        print(f"[GUARDIAO] {msg} em {modelo} ({ver}): {resp.text[:160]}", flush=True)
+                        return None, msg
+                    if resp.status_code == 429:
+                        ultimo_erro = "Cota/requisicoes limitadas no momento (HTTP 429)"
+                        print(f"[GUARDIAO] {ultimo_erro} em {modelo} ({ver}) tentativa {tentativa + 1}/3", flush=True)
+                        time.sleep(2.5 * (tentativa + 1))
+                        continue
+                    if resp.status_code in (500, 502, 503, 504):
+                        ultimo_erro = f"Instabilidade temporaria (HTTP {resp.status_code})"
+                        print(f"[GUARDIAO] {ultimo_erro} em {modelo} ({ver}) tentativa {tentativa + 1}/3", flush=True)
+                        time.sleep(1.5 * (tentativa + 1))
+                        continue
+                    resp.raise_for_status()
+                    data = resp.json()
+                    candidatos = data.get("candidates") or []
+                    if not candidatos:
+                        ultimo_erro = "Resposta sem candidatos"
+                        break
+                    partes = (candidatos[0].get("content") or {}).get("parts") or []
+                    texto_resp = "".join(str(p.get("text", "")) for p in partes if isinstance(p, dict)).strip()
+                    parsed = extrair_json_robusto(texto_resp)
+                    if parsed is not None:
+                        print(f"[GUARDIAO] Analise concluida via {modelo} ({ver}).", flush=True)
+                        return parsed, ""
+                    if texto_resp:
+                        print(f"[GUARDIAO] Resposta em texto livre via {modelo} ({ver}).", flush=True)
+                        return {
+                            "arma_fogo": False,
+                            "arma_branca": False,
+                            "atitude_ameaca": False,
+                            "objeto_na_mao": "",
+                            "pessoas_visiveis": 0,
+                            "nivel_sugerido": "OBSERVACAO",
+                            "objetos": [],
+                            "sintese_operacional": texto_resp[:220],
+                            "relato_detalhado": texto_resp,
+                            "pontos_atencao": [],
+                            "caixa_arma": None
+                        }, ""
+                    break
+                except Exception as exc:
+                    ultimo_erro = f"Erro de conexao: {type(exc).__name__}"
+                    print(f"[GUARDIAO] Falha em {modelo} ({ver}) tentativa {tentativa + 1}/3: {exc}", flush=True)
+                    time.sleep(1.0)
 
     print(f"[GUARDIAO] Fallback acionado: {ultimo_erro}", flush=True)
     return None, ultimo_erro
@@ -584,43 +587,14 @@ async def analisar_imagem_ia(caminho: Path):
     }
 
 
-async def avancar_ciclo(forcar_mesma: bool = False):
+async def avancar_ciclo():
     imagens = listar_imagens()
     if not imagens:
         return
-    anterior_mesma = None
-    if forcar_mesma and STATE["indice"] >= 0 and STATE["atual"]:
-        anterior_mesma = dict(STATE["atual"])
-    if not forcar_mesma or STATE["indice"] < 0:
-        STATE["indice"] = (STATE["indice"] + 1) % len(imagens)
+    STATE["indice"] = (STATE["indice"] + 1) % len(imagens)
     arq = imagens[STATE["indice"]]
     agora = agora_br()
     analise = await analisar_imagem_ia(arq)
-
-    if (
-        forcar_mesma
-        and anterior_mesma
-        and anterior_mesma.get("arquivo") == arq.name
-        and anterior_mesma.get("modo_analise") == "SENSOR_VISUAL"
-        and analise.get("modo_analise") == "CONTINGENCIA_PIXELS"
-    ):
-        analise = {
-            k: anterior_mesma[k]
-            for k in (
-                "modo_analise",
-                "status",
-                "nivel",
-                "pessoas_visiveis",
-                "objetos",
-                "sintese_operacional",
-                "relato_visual",
-                "pontos_atencao",
-                "detalhes_cena",
-                "caixa_arma",
-                "rotulo_arma"
-            )
-            if k in anterior_mesma
-        }
 
     oc = {
         "id": f"OC-{agora.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4].upper()}",
@@ -717,12 +691,6 @@ async def api_estado():
         "mensagens": STATE["mensagens"][-40:],
         "retorno_bravo": STATE["retorno_bravo"][-30:]
     }
-
-
-@app.post("/api/reanalisar")
-async def reanalisar():
-    await avancar_ciclo(forcar_mesma=True)
-    return {"ok": True}
 
 
 @app.post("/api/enviar-bravo")
@@ -840,7 +808,7 @@ header>div{min-width:0;max-width:100%;overflow-wrap:anywhere}
 img.foto{max-width:100%;width:auto;max-height:270px;border-radius:6px;display:block;margin:0 auto;background:#000}
 .botoes{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center;max-width:100%}
 button{padding:7px 10px;border:none;border-radius:6px;cursor:pointer;font-weight:600;color:#fff;font-size:12px;max-width:100%}
-.b-bravo{background:#dc2626}.b-arq{background:#2563eb}.b-desarq{background:#059669}.b-pausa{background:#475569}.b-env{background:#0284c7}.b-rean{background:#7c3aed}
+.b-bravo{background:#dc2626}.b-arq{background:#2563eb}.b-desarq{background:#059669}.b-pausa{background:#475569}.b-env{background:#0284c7}
 input{background:#0b101b;color:#fff;border:1px solid #334155;border-radius:6px;padding:6px;font-size:12px;min-width:0;max-width:100%}
 .box{background:#0b101b;border:1px solid #1e293b;border-radius:6px;padding:8px;max-height:220px;overflow-y:auto;overflow-x:hidden;font-size:12px;overflow-wrap:anywhere;word-break:break-word;max-width:100%}
 .item{border-bottom:1px solid #1e293b;padding:5px 0}
@@ -863,7 +831,6 @@ input{background:#0b101b;color:#fff;border:1px solid #334155;border-radius:6px;p
       <div class="botoes">
         <button class="b-bravo" onclick="acao('/api/enviar-bravo')">ENVIAR AO BRAVO</button>
         <button class="b-arq" onclick="acao('/api/arquivar')">ARQUIVAR OCORRENCIA</button>
-        <button class="b-rean" onclick="acao('/api/reanalisar')">REANALISAR AGORA</button>
         <button class="b-pausa" onclick="acao('/api/pausa')">PAUSAR / RETOMAR</button>
       </div>
     </div>
