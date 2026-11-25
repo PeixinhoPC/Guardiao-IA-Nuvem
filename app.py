@@ -40,13 +40,7 @@ TERMOS_BLOQUEADOS_VISAO = (
     "lyria",
     "robotics",
     "computer-use",
-    "aqa",
-    "latest",
-    "-pro",
-    "preview",
-    "3.1",
-    "1.5",
-    "2.0"
+    "aqa"
 )
 
 
@@ -241,15 +235,6 @@ def obter_modelos_disponiveis(chave: str):
     ):
         return _MODELOS_CACHE["lista"]
 
-    modelo_env = obter_modelo_env()
-    padrao = [
-        m for m in [
-            modelo_env,
-            "gemini-2.5-flash",
-            "gemini-2.5-flash-lite"
-        ] if m and not _modelo_bloqueado(m)
-    ]
-
     descobertos = []
     if chave:
         for ver in ("v1beta", "v1"):
@@ -262,20 +247,38 @@ def obter_modelos_disponiveis(chave: str):
                     for item in (r.json().get("models") or []):
                         nome = str(item.get("name") or "").replace("models/", "").strip()
                         metodos = item.get("supportedGenerationMethods") or []
-                        if nome and ("generateContent" in metodos or not metodos):
-                            if nome.startswith("gemini-2.5-") and not _modelo_bloqueado(nome) and nome not in descobertos:
-                                descobertos.append(nome)
+                        if nome and "generateContent" in metodos:
+                            if "gemini" in nome.lower() and not _modelo_bloqueado(nome):
+                                par = (nome, ver)
+                                if par not in descobertos:
+                                    descobertos.append(par)
                     if descobertos:
                         break
-            except Exception:
-                pass
+                else:
+                    print(f"[GUARDIAO] Falha ao listar modelos ({ver}): HTTP {r.status_code} — {r.text[:140]}", flush=True)
+            except Exception as exc:
+                print(f"[GUARDIAO] Erro ao listar modelos ({ver}): {type(exc).__name__} — {exc}", flush=True)
 
-    ordenados = []
-    for m in padrao + descobertos:
-        if m and not _modelo_bloqueado(m) and m not in ordenados:
-            ordenados.append(m)
+    modelo_env = obter_modelo_env()
+    fila = []
 
-    _MODELOS_CACHE["lista"] = ordenados[:3]
+    if modelo_env:
+        for ver in ("v1beta", "v1"):
+            if (modelo_env, ver) not in fila:
+                fila.append((modelo_env, ver))
+
+    for nome, ver in descobertos:
+        if (nome, ver) not in fila:
+            fila.append((nome, ver))
+
+    if not fila:
+        for m in ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"):
+            for ver in ("v1beta", "v1"):
+                if (m, ver) not in fila:
+                    fila.append((m, ver))
+
+    print(f"[GUARDIAO] Fila de modelos ativa: {fila[:5]}", flush=True)
+    _MODELOS_CACHE["lista"] = fila[:5]
     _MODELOS_CACHE["expira"] = agora + 900.0
     _MODELOS_CACHE["chave"] = chave
     return _MODELOS_CACHE["lista"]
@@ -414,63 +417,62 @@ def _chamar_visao_sync(mime: str, img_b64: str):
     }
 
     ultimo_erro = "Sem resposta da visao externa"
-    modelos = obter_modelos_disponiveis(chave)
-    for modelo in modelos:
-        for ver in ("v1beta", "v1"):
-            url = f"https://generativelanguage.googleapis.com/{ver}/models/{modelo}:generateContent?key={chave}"
-            for tentativa in range(2):
-                try:
-                    resp = requests.post(url, json=payload, timeout=15)
-                    if resp.status_code == 404:
-                        ultimo_erro = f"Modelo {modelo} indisponivel ({ver})"
-                        print(f"[GUARDIAO] {ultimo_erro}", flush=True)
-                        break
-                    if resp.status_code in (400, 401, 403):
-                        msg = f"Falha de autorizacao/chave (HTTP {resp.status_code})"
-                        print(f"[GUARDIAO] {msg} em {modelo} ({ver}): {resp.text[:180]}", flush=True)
-                        return None, msg
-                    if resp.status_code == 429:
-                        ultimo_erro = "Cota/requisicoes limitadas no momento (HTTP 429)"
-                        print(f"[GUARDIAO] {ultimo_erro} em {modelo} ({ver}) tentativa {tentativa + 1}/2", flush=True)
-                        time.sleep(1.5 * (tentativa + 1))
-                        continue
-                    if resp.status_code in (500, 502, 503, 504):
-                        ultimo_erro = f"Instabilidade temporaria (HTTP {resp.status_code})"
-                        print(f"[GUARDIAO] {ultimo_erro} em {modelo} ({ver}) tentativa {tentativa + 1}/2", flush=True)
-                        time.sleep(1.0 * (tentativa + 1))
-                        continue
-                    resp.raise_for_status()
-                    data = resp.json()
-                    candidatos = data.get("candidates") or []
-                    if not candidatos:
-                        ultimo_erro = "Resposta sem candidatos"
-                        break
-                    partes = (candidatos[0].get("content") or {}).get("parts") or []
-                    texto_resp = "".join(str(p.get("text", "")) for p in partes if isinstance(p, dict)).strip()
-                    parsed = extrair_json_robusto(texto_resp)
-                    if parsed is not None:
-                        print(f"[GUARDIAO] Analise concluida via {modelo} ({ver}).", flush=True)
-                        return parsed, ""
-                    if texto_resp:
-                        print(f"[GUARDIAO] Resposta em texto livre via {modelo} ({ver}).", flush=True)
-                        return {
-                            "arma_fogo": False,
-                            "arma_branca": False,
-                            "atitude_ameaca": False,
-                            "objeto_na_mao": "",
-                            "pessoas_visiveis": 0,
-                            "nivel_sugerido": "OBSERVACAO",
-                            "objetos": [],
-                            "sintese_operacional": texto_resp[:220],
-                            "relato_detalhado": texto_resp,
-                            "pontos_atencao": [],
-                            "caixa_arma": None
-                        }, ""
+    fila = obter_modelos_disponiveis(chave)
+    for modelo, ver in fila:
+        url = f"https://generativelanguage.googleapis.com/{ver}/models/{modelo}:generateContent?key={chave}"
+        for tentativa in range(2):
+            try:
+                resp = requests.post(url, json=payload, timeout=15)
+                if resp.status_code == 404:
+                    ultimo_erro = f"Modelo {modelo} indisponivel ({ver})"
+                    print(f"[GUARDIAO] {ultimo_erro}", flush=True)
                     break
-                except Exception as exc:
-                    ultimo_erro = f"Erro de conexao: {type(exc).__name__}"
-                    print(f"[GUARDIAO] Falha em {modelo} ({ver}) tentativa {tentativa + 1}/2: {exc}", flush=True)
-                    time.sleep(0.8)
+                if resp.status_code in (400, 401, 403):
+                    msg = f"Falha de autorizacao/chave (HTTP {resp.status_code})"
+                    print(f"[GUARDIAO] {msg} em {modelo} ({ver}): {resp.text[:180]}", flush=True)
+                    return None, msg
+                if resp.status_code == 429:
+                    ultimo_erro = "Cota/requisicoes limitadas no momento (HTTP 429)"
+                    print(f"[GUARDIAO] {ultimo_erro} em {modelo} ({ver}) tentativa {tentativa + 1}/2", flush=True)
+                    time.sleep(1.5 * (tentativa + 1))
+                    continue
+                if resp.status_code in (500, 502, 503, 504):
+                    ultimo_erro = f"Instabilidade temporaria (HTTP {resp.status_code})"
+                    print(f"[GUARDIAO] {ultimo_erro} em {modelo} ({ver}) tentativa {tentativa + 1}/2", flush=True)
+                    time.sleep(1.0 * (tentativa + 1))
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                candidatos = data.get("candidates") or []
+                if not candidatos:
+                    ultimo_erro = "Resposta sem candidatos"
+                    break
+                partes = (candidatos[0].get("content") or {}).get("parts") or []
+                texto_resp = "".join(str(p.get("text", "")) for p in partes if isinstance(p, dict)).strip()
+                parsed = extrair_json_robusto(texto_resp)
+                if parsed is not None:
+                    print(f"[GUARDIAO] Analise concluida via {modelo} ({ver}).", flush=True)
+                    return parsed, ""
+                if texto_resp:
+                    print(f"[GUARDIAO] Resposta em texto livre via {modelo} ({ver}).", flush=True)
+                    return {
+                        "arma_fogo": False,
+                        "arma_branca": False,
+                        "atitude_ameaca": False,
+                        "objeto_na_mao": "",
+                        "pessoas_visiveis": 0,
+                        "nivel_sugerido": "OBSERVACAO",
+                        "objetos": [],
+                        "sintese_operacional": texto_resp[:220],
+                        "relato_detalhado": texto_resp,
+                        "pontos_atencao": [],
+                        "caixa_arma": None
+                    }, ""
+                break
+            except Exception as exc:
+                ultimo_erro = f"Erro de conexao: {type(exc).__name__}"
+                print(f"[GUARDIAO] Falha em {modelo} ({ver}) tentativa {tentativa + 1}/2: {exc}", flush=True)
+                time.sleep(0.8)
 
     print(f"[GUARDIAO] Fallback acionado: {ultimo_erro}", flush=True)
     return None, ultimo_erro
