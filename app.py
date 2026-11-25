@@ -41,7 +41,8 @@ TERMOS_BLOQUEADOS_VISAO = (
     "robotics",
     "computer-use",
     "aqa",
-    "latest"
+    "latest",
+    "-pro"
 )
 
 
