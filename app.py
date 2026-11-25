@@ -35,6 +35,7 @@ TERMOS_BLOQUEADOS_VISAO = (
     "live",
     "embedding",
     "imagen",
+    "image",
     "veo",
     "lyria",
     "robotics",
@@ -162,9 +163,9 @@ def inspecionar_imagem(caminho: Path):
                 razao_regiao = max(1, max_x - min_x + 1) / float(max(1, max_y - min_y + 1))
 
             otimizada = im_rgb.copy()
-            otimizada.thumbnail((1120, 1120))
+            otimizada.thumbnail((960, 960))
             buf = BytesIO()
-            otimizada.save(buf, format="JPEG", quality=86, optimize=True)
+            otimizada.save(buf, format="JPEG", quality=82, optimize=True)
             b64_data = base64.b64encode(buf.getvalue()).decode("utf-8")
     except Exception as exc:
         obs_cena.append(f"Leitura visual com restricao: {exc}")
@@ -242,6 +243,7 @@ def obter_modelos_disponiveis(chave: str):
             "gemini-2.5-flash",
             "gemini-2.5-flash-lite",
             "gemini-2.0-flash",
+            "gemini-2.0-flash-lite",
             "gemini-1.5-flash"
         ] if m and not _modelo_bloqueado(m)
     ]
@@ -272,7 +274,7 @@ def obter_modelos_disponiveis(chave: str):
             ordenados.append(m)
 
     _MODELOS_CACHE["lista"] = ordenados[:6]
-    _MODELOS_CACHE["expira"] = agora + 600.0
+    _MODELOS_CACHE["expira"] = agora + 900.0
     _MODELOS_CACHE["chave"] = chave
     return _MODELOS_CACHE["lista"]
 
@@ -324,9 +326,10 @@ def analise_visual_fallback(info: dict, motivo: str = ""):
         )
 
     if motivo:
-        pontos.append(f"Diagnostico: {motivo}")
+        pontos.append(f"Contingencia: {motivo}")
 
     return {
+        "modo_analise": "CONTINGENCIA_PIXELS",
         "status": status,
         "nivel": nivel,
         "pessoas_visiveis": 0,
@@ -413,59 +416,56 @@ def _chamar_visao_sync(mime: str, img_b64: str):
     for modelo in modelos:
         for ver in ("v1beta", "v1"):
             url = f"https://generativelanguage.googleapis.com/{ver}/models/{modelo}:generateContent?key={chave}"
-            for tentativa in range(2):
-                try:
-                    resp = requests.post(url, json=payload, timeout=18)
-                    if resp.status_code == 404:
-                        ultimo_erro = f"Modelo {modelo} indisponivel ({ver})"
-                        print(f"[GUARDIAO] {ultimo_erro}", flush=True)
-                        break
-                    if resp.status_code in (400, 401, 403):
-                        msg = f"Falha de autorizacao/chave (HTTP {resp.status_code})"
-                        print(f"[GUARDIAO] {msg} em {modelo} ({ver}): {resp.text[:180]}", flush=True)
-                        return None, msg
-                    if resp.status_code in (429, 500, 502, 503, 504):
-                        ultimo_erro = f"Instabilidade temporaria (HTTP {resp.status_code})"
-                        print(f"[GUARDIAO] {ultimo_erro} em {modelo} ({ver}) tentativa {tentativa + 1}", flush=True)
-                        if tentativa == 0:
-                            time.sleep(1.5)
-                            continue
-                        break
-                    resp.raise_for_status()
-                    data = resp.json()
-                    candidatos = data.get("candidates") or []
-                    if not candidatos:
-                        ultimo_erro = "Resposta sem candidatos"
-                        break
-                    partes = (candidatos[0].get("content") or {}).get("parts") or []
-                    texto_resp = "".join(str(p.get("text", "")) for p in partes if isinstance(p, dict)).strip()
-                    parsed = extrair_json_robusto(texto_resp)
-                    if parsed is not None:
-                        print(f"[GUARDIAO] Analise concluida via {modelo} ({ver}).", flush=True)
-                        return parsed, ""
-                    if texto_resp:
-                        print(f"[GUARDIAO] Resposta em texto livre via {modelo} ({ver}).", flush=True)
-                        return {
-                            "arma_fogo": False,
-                            "arma_branca": False,
-                            "atitude_ameaca": False,
-                            "objeto_na_mao": "",
-                            "pessoas_visiveis": 0,
-                            "nivel_sugerido": "OBSERVACAO",
-                            "objetos": [],
-                            "sintese_operacional": texto_resp[:220],
-                            "relato_detalhado": texto_resp,
-                            "pontos_atencao": [],
-                            "caixa_arma": None
-                        }, ""
-                    break
-                except Exception as exc:
-                    ultimo_erro = f"Erro de conexao: {type(exc).__name__}"
-                    print(f"[GUARDIAO] Falha em {modelo} ({ver}): {exc}", flush=True)
-                    if tentativa == 0:
-                        time.sleep(1.0)
-                        continue
-                    break
+            try:
+                resp = requests.post(url, json=payload, timeout=16)
+                if resp.status_code == 404:
+                    ultimo_erro = f"Modelo {modelo} indisponivel ({ver})"
+                    continue
+                if resp.status_code in (400, 401, 403):
+                    msg = f"Falha de autorizacao/chave (HTTP {resp.status_code})"
+                    print(f"[GUARDIAO] {msg} em {modelo} ({ver}): {resp.text[:160]}", flush=True)
+                    return None, msg
+                if resp.status_code == 429:
+                    ultimo_erro = "Cota/requisicoes limitadas no momento (HTTP 429)"
+                    print(f"[GUARDIAO] {ultimo_erro} em {modelo} ({ver})", flush=True)
+                    time.sleep(2.5)
+                    continue
+                if resp.status_code in (500, 502, 503, 504):
+                    ultimo_erro = f"Instabilidade temporaria (HTTP {resp.status_code})"
+                    print(f"[GUARDIAO] {ultimo_erro} em {modelo} ({ver})", flush=True)
+                    time.sleep(1.5)
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                candidatos = data.get("candidates") or []
+                if not candidatos:
+                    ultimo_erro = "Resposta sem candidatos"
+                    continue
+                partes = (candidatos[0].get("content") or {}).get("parts") or []
+                texto_resp = "".join(str(p.get("text", "")) for p in partes if isinstance(p, dict)).strip()
+                parsed = extrair_json_robusto(texto_resp)
+                if parsed is not None:
+                    print(f"[GUARDIAO] Analise concluida via {modelo} ({ver}).", flush=True)
+                    return parsed, ""
+                if texto_resp:
+                    print(f"[GUARDIAO] Resposta em texto livre via {modelo} ({ver}).", flush=True)
+                    return {
+                        "arma_fogo": False,
+                        "arma_branca": False,
+                        "atitude_ameaca": False,
+                        "objeto_na_mao": "",
+                        "pessoas_visiveis": 0,
+                        "nivel_sugerido": "OBSERVACAO",
+                        "objetos": [],
+                        "sintese_operacional": texto_resp[:220],
+                        "relato_detalhado": texto_resp,
+                        "pontos_atencao": [],
+                        "caixa_arma": None
+                    }, ""
+            except Exception as exc:
+                ultimo_erro = f"Erro de conexao: {type(exc).__name__}"
+                print(f"[GUARDIAO] Falha em {modelo} ({ver}): {exc}", flush=True)
+                continue
 
     print(f"[GUARDIAO] Fallback acionado: {ultimo_erro}", flush=True)
     return None, ultimo_erro
@@ -569,6 +569,7 @@ async def analisar_imagem_ia(caminho: Path):
         rotulo_arma = objeto_mao or (objetos[0]["rotulo"] if objetos else ("ARMA DE FOGO" if arma_fogo else "ARMA BRANCA"))
 
     return {
+        "modo_analise": "SENSOR_VISUAL",
         "status": status,
         "nivel": nivel,
         "pessoas_visiveis": pessoas,
@@ -582,11 +583,12 @@ async def analisar_imagem_ia(caminho: Path):
     }
 
 
-async def avancar_ciclo():
+async def avancar_ciclo(forcar_mesma: bool = False):
     imagens = listar_imagens()
     if not imagens:
         return
-    STATE["indice"] = (STATE["indice"] + 1) % len(imagens)
+    if not forcar_mesma or STATE["indice"] < 0:
+        STATE["indice"] = (STATE["indice"] + 1) % len(imagens)
     arq = imagens[STATE["indice"]]
     agora = agora_br()
     analise = await analisar_imagem_ia(arq)
@@ -688,6 +690,12 @@ async def api_estado():
         "mensagens": STATE["mensagens"][-40:],
         "retorno_bravo": STATE["retorno_bravo"][-30:]
     }
+
+
+@app.post("/api/reanalisar")
+async def reanalisar():
+    await avancar_ciclo(forcar_mesma=True)
+    return {"ok": True}
 
 
 @app.post("/api/enviar-bravo")
@@ -805,7 +813,7 @@ header>div{min-width:0;max-width:100%;overflow-wrap:anywhere}
 img.foto{max-width:100%;width:auto;max-height:270px;border-radius:6px;display:block;margin:0 auto;background:#000}
 .botoes{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center;max-width:100%}
 button{padding:7px 10px;border:none;border-radius:6px;cursor:pointer;font-weight:600;color:#fff;font-size:12px;max-width:100%}
-.b-bravo{background:#dc2626}.b-arq{background:#2563eb}.b-desarq{background:#059669}.b-pausa{background:#475569}.b-env{background:#0284c7}
+.b-bravo{background:#dc2626}.b-arq{background:#2563eb}.b-desarq{background:#059669}.b-pausa{background:#475569}.b-env{background:#0284c7}.b-rean{background:#7c3aed}
 input{background:#0b101b;color:#fff;border:1px solid #334155;border-radius:6px;padding:6px;font-size:12px;min-width:0;max-width:100%}
 .box{background:#0b101b;border:1px solid #1e293b;border-radius:6px;padding:8px;max-height:195px;overflow-y:auto;overflow-x:hidden;font-size:12px;overflow-wrap:anywhere;word-break:break-word;max-width:100%}
 .item{border-bottom:1px solid #1e293b;padding:5px 0}
@@ -828,6 +836,7 @@ input{background:#0b101b;color:#fff;border:1px solid #334155;border-radius:6px;p
       <div class="botoes">
         <button class="b-bravo" onclick="acao('/api/enviar-bravo')">ENVIAR AO BRAVO</button>
         <button class="b-arq" onclick="acao('/api/arquivar')">ARQUIVAR OCORRENCIA</button>
+        <button class="b-rean" onclick="acao('/api/reanalisar')">REANALISAR AGORA</button>
         <button class="b-pausa" onclick="acao('/api/pausa')">PAUSAR / RETOMAR</button>
       </div>
     </div>
@@ -922,8 +931,8 @@ async function atualizar(){
   const a = d.atual;
   if(a){
     window._atualId = a.id;
-    document.getElementById("foto").src = "/imagem?t=" + encodeURIComponent(a.id + "_" + a.situacao_fluxo);
-    document.getElementById("meta").textContent = "ID: "+a.id+" | "+a.arquivo+" ("+a.indice+"/"+a.total+") | "+a.situacao_fluxo;
+    document.getElementById("foto").src = "/imagem?t=" + encodeURIComponent(a.id + "_" + a.situacao_fluxo + "_" + (a.modo_analise || ""));
+    document.getElementById("meta").textContent = "ID: "+a.id+" | "+a.arquivo+" ("+a.indice+"/"+a.total+") | "+a.situacao_fluxo+" | "+(a.modo_analise||"");
     const objs = (a.objetos||[]).map(x => {
       const rot = esc(x.rotulo || "");
       const det = x.detalhe ? " [" + esc(x.detalhe) + "]" : "";
@@ -933,7 +942,7 @@ async function atualizar(){
     const pontos = (a.pontos_atencao||[]).map(p => esc(p)).join(" | ") || "Sem pontos adicionais";
     const cls = (a.nivel==="ALTO_RISCO"||a.nivel==="ATENCAO_ELEVADA")?"crit":(a.nivel==="OBSERVACAO"||a.nivel==="REGISTRO_OBJETO"?"med":"seg");
     document.getElementById("relatorio").innerHTML =
-      "<div class='"+cls+"'><b>NIVEL:</b> "+esc(a.nivel)+" | <b>STATUS:</b> "+esc(a.status)+" | <b>PESSOAS:</b> "+esc(a.pessoas_visiveis ?? 0)+"</div>"+
+      "<div class='"+cls+"'><b>NIVEL:</b> "+esc(a.nivel)+" | <b>STATUS:</b> "+esc(a.status)+" | <b>PESSOAS:</b> "+esc(a.pessoas_visiveis ?? 0)+" | <b>MODO:</b> "+esc(a.modo_analise || "SENSOR_VISUAL")+"</div>"+
       "<div class='linha-rel'><b>SINTESE OPERACIONAL (ALFA):</b> "+esc(a.sintese_operacional || a.relato_visual)+"</div>"+
       "<div class='linha-rel'><b>ELEMENTOS / OBJETOS VISIVEIS:</b> "+objs+"</div>"+
       "<div class='linha-rel'><b>RELATO COMPLETO DA CENA:</b> "+esc(a.relato_visual)+"</div>"+
