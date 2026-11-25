@@ -45,7 +45,13 @@ TERMOS_BLOQUEADOS_VISAO = (
     "lyria",
     "robotics",
     "computer-use",
-    "aqa"
+    "aqa",
+    "preview",
+    "exp",
+    "3.1",
+    "3.5",
+    "2.5-flash-lite",
+    "thinking"
 )
 
 
@@ -74,10 +80,10 @@ def _limpar_indisponiveis_se_expirado():
     agora = time.time()
     if agora >= _MODELOS_INDISPONIVEIS["expira"]:
         _MODELOS_INDISPONIVEIS["pares"].clear()
-        _MODELOS_INDISPONIVEIS["expira"] = agora + 900.0
+        _MODELOS_INDISPONIVEIS["expira"] = agora + 1800.0
 
 
-def _marcar_modelo_indisponivel(modelo: str, ver: str):
+def _remover_modelo_definitivo(modelo: str, ver: str):
     _limpar_indisponiveis_se_expirado()
     _MODELOS_INDISPONIVEIS["pares"].add((modelo, ver))
     if _MODELOS_CACHE["lista"]:
@@ -184,9 +190,9 @@ def inspecionar_imagem(caminho: Path):
                 razao_regiao = max(1, max_x - min_x + 1) / float(max(1, max_y - min_y + 1))
 
             otimizada = im_rgb.copy()
-            otimizada.thumbnail((960, 960))
+            otimizada.thumbnail((800, 800))
             buf = BytesIO()
-            otimizada.save(buf, format="JPEG", quality=82, optimize=True)
+            otimizada.save(buf, format="JPEG", quality=80, optimize=True)
             b64_data = base64.b64encode(buf.getvalue()).decode("utf-8")
     except Exception as exc:
         obs_cena.append(f"Leitura visual com restricao: {exc}")
@@ -264,7 +270,7 @@ def obter_modelos_disponiveis(chave: str):
             try:
                 r = requests.get(
                     f"https://generativelanguage.googleapis.com/{ver}/models?key={chave}",
-                    timeout=8
+                    timeout=10
                 )
                 if r.status_code == 200:
                     for item in (r.json().get("models") or []):
@@ -277,40 +283,34 @@ def obter_modelos_disponiveis(chave: str):
                                     descobertos.append(par)
                     if descobertos:
                         break
-                else:
-                    print(f"[GUARDIAO] Falha ao listar modelos ({ver}): HTTP {r.status_code} — {r.text[:140]}", flush=True)
             except Exception as exc:
                 print(f"[GUARDIAO] Erro ao listar modelos ({ver}): {type(exc).__name__} — {exc}", flush=True)
 
     modelo_env = obter_modelo_env()
-    candidatos = []
-
-    for m, ver in descobertos:
-        if "flash-lite" in m and (m, ver) not in candidatos:
-            candidatos.append((m, ver))
+    prioritarios = []
 
     if modelo_env:
         for ver in ("v1beta", "v1"):
             par = (modelo_env, ver)
-            if par not in candidatos and par not in _MODELOS_INDISPONIVEIS["pares"]:
-                candidatos.append(par)
+            if par not in prioritarios and par not in _MODELOS_INDISPONIVEIS["pares"]:
+                prioritarios.append(par)
+
+    for m_pref in ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-latest", "gemini-2.0-flash-lite", "gemini-flash-lite-latest"):
+        for ver in ("v1beta", "v1"):
+            par = (m_pref, ver)
+            if par not in prioritarios and par not in _MODELOS_INDISPONIVEIS["pares"]:
+                prioritarios.append(par)
 
     for par in descobertos:
-        if par not in candidatos:
-            candidatos.append(par)
+        if par not in prioritarios and par not in _MODELOS_INDISPONIVEIS["pares"]:
+            prioritarios.append(par)
 
-    if not candidatos:
-        for m in ("gemini-flash-lite-latest", "gemini-2.5-flash", "gemini-2.0-flash"):
-            for ver in ("v1beta", "v1"):
-                par = (m, ver)
-                if par not in candidatos and par not in _MODELOS_INDISPONIVEIS["pares"]:
-                    candidatos.append(par)
-
-    print(f"[GUARDIAO] Fila de modelos ativa: {candidatos[:5]}", flush=True)
-    _MODELOS_CACHE["lista"] = candidatos[:5]
-    _MODELOS_CACHE["expira"] = agora + 900.0
+    fila_final = prioritarios[:6]
+    print(f"[GUARDIAO] Fila de modelos estaveis ativa: {fila_final}", flush=True)
+    _MODELOS_CACHE["lista"] = fila_final
+    _MODELOS_CACHE["expira"] = agora + 1800.0
     _MODELOS_CACHE["chave"] = chave
-    return _MODELOS_CACHE["lista"]
+    return fila_final
 
 
 def analise_visual_fallback(info: dict, motivo: str = ""):
@@ -413,8 +413,8 @@ def _chamar_visao_sync(mime: str, img_b64: str):
         "Descreva com precisao extrema e fidelidade absoluta o que esta visivel na imagem (ignore completamente o nome do arquivo).\n"
         "Detalhe sempre:\n"
         "1) Pessoas visiveis: quantidade, vestimentas/farda (ex.: farda policial/militar, traje civil, roupa escura), postura/posicao (em pe, sentada, deitada no chao, aparentemente ferida ou imobilizada, apontando para cima/frente, mao proxima ao coldre, etc.) e proximidade/relacao com outras pessoas na cena.\n"
-        "2) Armas e objetos: especifique se ha arma de fogo longa ou curta (fuzil, carabina, espingarda, pistola, revolver) ou arma branca, onde esta (sobre o corpo/chao, dentro do coldre na cintura, empunhada, apontada para cima/alguem, cao/gatilho aparente) e outros objetos na mao ou na cena.\n"
-        "3) Se houver arma de fogo ou arma branca visivel na cena, informe em 'caixa_arma' as coordenadas normalizadas de 0 a 1000 no formato [ymin, xmin, ymax, xmax] delimitando a arma.\n"
+        "2) Armas e objetos: especifique EXATAMENTE qual arma esta na imagem (ex.: fuzil, carabina, espingarda, metralhadora/fuzil-metralhador, pistola, revolver, faca), onde esta (isolada em fundo branco, sobre o corpo/chao, dentro do coldre na cintura, empunhada, apontada para cima/alguem) e outros objetos na mao ou na cena.\n"
+        "3) Se houver qualquer arma de fogo ou arma branca visivel na cena (mesmo no coldre ou isolada), informe OBRIGATORIAMENTE em 'caixa_arma' as coordenadas normalizadas de 0 a 1000 no formato [ymin, xmin, ymax, xmax] delimitando exatamente a arma.\n"
         "Responda APENAS com um JSON valido (sem markdown, sem texto fora do JSON):\n"
         "{\n"
         '  "arma_fogo": bool,\n'
@@ -424,8 +424,8 @@ def _chamar_visao_sync(mime: str, img_b64: str):
         '  "pessoas_visiveis": int,\n'
         '  "nivel_sugerido": "NORMAL" | "OBSERVACAO" | "ATENCAO_ELEVADA" | "ALTO_RISCO",\n'
         '  "objetos": [{"rotulo": "string", "confianca": 0-100, "detalhe": "string"}],\n'
-        '  "sintese_operacional": "string direta com os fatos criticos, arma/coldre/mira, pessoas (inclusive se deitada ou aparentemente ferida) e atitude para decisao do ALFA",\n'
-        '  "relato_detalhado": "string completa e fiel descrevendo pessoas, vestimenta/farda, postura (em pe, sentada, deitada, aparentemente ferida), arma (coldre, mao, sobre o corpo, direcao da mira), proximidade de terceiros e ambiente",\n'
+        '  "sintese_operacional": "string direta com os fatos criticos, tipo exato da arma/coldre/mira, pessoas (inclusive se deitada ou aparentemente ferida) e atitude para decisao do ALFA",\n'
+        '  "relato_detalhado": "string completa e fiel descrevendo pessoas, vestimenta/farda, postura (em pe, sentada, deitada, aparentemente ferida), arma (tipo exato, coldre, mao, sobre o corpo, direcao da mira), proximidade de terceiros e ambiente",\n'
         '  "pontos_atencao": ["string"],\n'
         '  "caixa_arma": [ymin, xmin, ymax, xmax] ou null\n'
         "}\n"
@@ -451,10 +451,10 @@ def _chamar_visao_sync(mime: str, img_b64: str):
         url = f"https://generativelanguage.googleapis.com/{ver}/models/{modelo}:generateContent?key={chave}"
         for tentativa in range(2):
             try:
-                resp = requests.post(url, json=payload, timeout=15)
+                resp = requests.post(url, json=payload, timeout=25)
                 if resp.status_code == 404:
-                    _marcar_modelo_indisponivel(modelo, ver)
-                    ultimo_erro = f"Modelo {modelo} indisponivel ({ver})"
+                    _remover_modelo_definitivo(modelo, ver)
+                    ultimo_erro = f"Modelo {modelo} removido ({ver})"
                     print(f"[GUARDIAO] {ultimo_erro}", flush=True)
                     break
                 if resp.status_code in (400, 401, 403):
@@ -464,13 +464,13 @@ def _chamar_visao_sync(mime: str, img_b64: str):
                 if resp.status_code == 429:
                     ultimo_erro = "Cota/requisicoes limitadas no momento (HTTP 429)"
                     print(f"[GUARDIAO] {ultimo_erro} em {modelo} ({ver}) tentativa {tentativa + 1}/2", flush=True)
-                    time.sleep(1.5 * (tentativa + 1))
+                    time.sleep(2.0 * (tentativa + 1))
                     continue
                 if resp.status_code in (500, 502, 503, 504):
-                    ultimo_erro = f"Instabilidade temporaria (HTTP {resp.status_code})"
-                    print(f"[GUARDIAO] {ultimo_erro} em {modelo} ({ver}) tentativa {tentativa + 1}/2", flush=True)
-                    time.sleep(1.0 * (tentativa + 1))
-                    continue
+                    _remover_modelo_definitivo(modelo, ver)
+                    ultimo_erro = f"Modelo {modelo} removido por erro HTTP {resp.status_code} ({ver})"
+                    print(f"[GUARDIAO] {ultimo_erro}", flush=True)
+                    break
                 resp.raise_for_status()
                 data = resp.json()
                 candidatos = data.get("candidates") or []
@@ -499,10 +499,15 @@ def _chamar_visao_sync(mime: str, img_b64: str):
                         "caixa_arma": None
                     }, ""
                 break
+            except requests.exceptions.Timeout:
+                _remover_modelo_definitivo(modelo, ver)
+                ultimo_erro = f"Modelo {modelo} removido por Timeout ({ver})"
+                print(f"[GUARDIAO] {ultimo_erro}", flush=True)
+                break
             except Exception as exc:
                 ultimo_erro = f"Erro de conexao: {type(exc).__name__}"
                 print(f"[GUARDIAO] Falha em {modelo} ({ver}) tentativa {tentativa + 1}/2: {exc}", flush=True)
-                time.sleep(0.8)
+                time.sleep(1.0)
 
     print(f"[GUARDIAO] Fallback acionado: {ultimo_erro}", flush=True)
     return None, ultimo_erro
@@ -626,7 +631,6 @@ async def avancar_ciclo():
         return
     STATE["indice"] = (STATE["indice"] + 1) % len(imagens)
     arq = imagens[STATE["indice"]]
-    agora = agora_br()
     try:
         analise = await analisar_imagem_ia(arq)
     except Exception as exc:
@@ -634,6 +638,7 @@ async def avancar_ciclo():
         info = await asyncio.to_thread(inspecionar_imagem, arq)
         analise = analise_visual_fallback(info, f"Falha inesperada: {type(exc).__name__}")
 
+    agora = agora_br()
     oc = {
         "id": f"OC-{agora.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4].upper()}",
         "iso_dt": agora.isoformat(),
