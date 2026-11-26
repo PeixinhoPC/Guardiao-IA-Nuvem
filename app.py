@@ -55,6 +55,21 @@ TERMOS_REDUCAO_50 = (
     "telefone"
 )
 
+ENDERECOS_DF_OPERACIONAIS = (
+    "Eixo Monumental — Trecho 1 (Proximo ao Complexo Cultural), Brasilia/DF",
+    "W3 Sul — CRS 508, Asa Sul, Brasilia/DF",
+    "Setor Comercial Sul — Quadra 06, Brasilia/DF",
+    "L2 Norte — SGAN 607, Asa Norte, Brasilia/DF",
+    "EPNB (DF-075) — KM 04, Candangolandia/DF",
+    "Avenida Central — QNM 17, Ceilandia/DF",
+    "Avenida das Araucarias — Lote 1420, Aguas Claras/DF",
+    "Rodoviaria do Plano Piloto — Plataforma Superior, Brasilia/DF",
+    "Setor de Diversoes Sul (Conic) — Bloco B, Brasilia/DF",
+    "Avenida Elmo Serejo — QNM 02, Taguatinga/DF",
+    "EPCT (DF-001) — KM 12, Sobradinho/DF",
+    "Setor Central — Quadra 03, Gama/DF"
+)
+
 
 def obter_chave_api() -> str:
     for nome in ("GUARDIAO_CHAVE_VISAO", "GUARDIAO_API_KEY", "GEMINI_API_KEY"):
@@ -88,6 +103,14 @@ def _remover_modelo_404(modelo: str, ver: str):
 
 def agora_br() -> datetime:
     return datetime.now(TZ_BR)
+
+
+def obter_endereco_ocorrencia(indice_zero: int, nome_arquivo: str) -> str:
+    fixo = os.environ.get("GUARDIAO_ENDERECO_PADRAO", "").strip()
+    if fixo:
+        return fixo
+    base_idx = sum(ord(c) for c in (nome_arquivo or "")) + max(0, indice_zero)
+    return ENDERECOS_DF_OPERACIONAIS[base_idx % len(ENDERECOS_DF_OPERACIONAIS)]
 
 
 def _eh_item_reduzido(nome_arquivo: str) -> bool:
@@ -655,10 +678,12 @@ async def analisar_imagem_ia(caminho: Path):
 
 def _registrar_ocorrencia(arq: Path, indice_zero: int, total: int, analise: dict):
     agora = agora_br()
+    endereco = obter_endereco_ocorrencia(indice_zero, arq.name)
     oc = {
         "id": f"OC-{agora.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4].upper()}",
         "iso_dt": agora.isoformat(),
         "data_hora": agora.strftime("%d/%m/%Y %H:%M:%S"),
+        "endereco": endereco,
         "indice": indice_zero + 1,
         "total": total,
         "arquivo": arq.name,
@@ -675,7 +700,7 @@ def _registrar_ocorrencia(arq: Path, indice_zero: int, total: int, analise: dict
     STATE["mensagens"].append({
         "origem": "GUARDIAO",
         "hora": agora.strftime("%H:%M:%S"),
-        "texto": f"[{oc['id']}] {oc['nivel']} — {oc['sintese_operacional']}"
+        "texto": f"[{oc['id']}] {oc['nivel']} — {endereco} — {oc['sintese_operacional']}"
     })
     STATE["mensagens"] = STATE["mensagens"][-150:]
     return oc
@@ -704,6 +729,8 @@ async def voltar_ocorrencia_anterior():
         idx_atual = next((i for i, o in enumerate(ativas) if o["id"] == atual_id), len(ativas) - 1)
         idx_prev = idx_atual - 1 if idx_atual > 0 else len(ativas) - 1
         anterior = dict(ativas[idx_prev])
+        if not anterior.get("endereco"):
+            anterior["endereco"] = obter_endereco_ocorrencia(max(0, (anterior.get("indice") or 1) - 1), anterior.get("arquivo") or "")
         STATE["atual"] = anterior
         STATE["ultima_troca"] = time.time()
         return anterior
@@ -721,15 +748,16 @@ async def voltar_ocorrencia_anterior():
     return _registrar_ocorrencia(arq, STATE["indice"], len(imagens), analise)
 
 
-async def simular_retorno_bravo_demo(oc_id: str, unidade: str = "BRAVO"):
+async def simular_retorno_bravo_demo(oc_id: str, unidade: str = "BRAVO", endereco: str = ""):
     if not MODO_DEMO_RETORNO_BRAVO:
         return
     await asyncio.sleep(8)
     hora = agora_br().strftime("%H:%M:%S")
+    loc_txt = f" ({endereco})" if endereco else ""
     relatos = [
-        f"[DEMO] Unidade {unidade} em deslocamento ate o ponto informado pelo ALFA.",
-        f"[DEMO] Unidade {unidade} no local; averiguacao em andamento.",
-        f"[DEMO] Unidade {unidade} concluiu averiguacao inicial e aguarda diretriz do ALFA."
+        f"[DEMO] Unidade {unidade} em deslocamento ate {loc_txt.strip() or 'o ponto informado pelo ALFA'}.",
+        f"[DEMO] Unidade {unidade} no local{loc_txt}; averiguacao em andamento.",
+        f"[DEMO] Unidade {unidade} concluiu averiguacao inicial{loc_txt} e aguarda diretriz do ALFA."
     ]
     txt = random.choice(relatos)
     STATE["retorno_bravo"].append({"hora": hora, "ocorrencia_id": oc_id, "texto": txt})
@@ -807,7 +835,8 @@ async def enviar_bravo(req: Request):
     oc_id = dados.get("id") or (STATE["atual"]["id"] if STATE["atual"] else "N/A")
     unidade = (dados.get("unidade") or "BRAVO-01").strip()
     hora = agora_br().strftime("%H:%M:%S")
-    envio_txt = f"ENVIADO PARA {unidade} as {hora}"
+    endereco = (STATE["atual"].get("endereco") if STATE["atual"] else "") or obter_endereco_ocorrencia(0, oc_id)
+    envio_txt = f"ENVIADO PARA {unidade} as {hora} — Local: {endereco}"
     for o in STATE["historico"]:
         if o["id"] == oc_id:
             o["situacao_fluxo"] = f"ENVIADO ({unidade})"
@@ -815,11 +844,11 @@ async def enviar_bravo(req: Request):
     if STATE["atual"] and STATE["atual"]["id"] == oc_id:
         STATE["atual"]["situacao_fluxo"] = f"ENVIADO ({unidade})"
         STATE["atual"]["unidade_bravo"] = envio_txt
-    STATE["mensagens"].append({"origem": f"ALFA -> {unidade}", "hora": hora, "texto": f"Ocorrencia {oc_id} enviada para {unidade}."})
+    STATE["mensagens"].append({"origem": f"ALFA -> {unidade}", "hora": hora, "texto": f"Ocorrencia {oc_id} enviada para {unidade} ({endereco})."})
     STATE["mensagens"] = STATE["mensagens"][-150:]
     if MODO_DEMO_RETORNO_BRAVO:
-        asyncio.create_task(simular_retorno_bravo_demo(oc_id, unidade))
-    return {"ok": True, "unidade": unidade, "envio": envio_txt}
+        asyncio.create_task(simular_retorno_bravo_demo(oc_id, unidade, endereco))
+    return {"ok": True, "unidade": unidade, "endereco": endereco, "envio": envio_txt}
 
 
 @app.post("/api/ocorrencia-anterior")
@@ -923,6 +952,7 @@ header>div{min-width:0;max-width:100%;overflow-wrap:anywhere}
 .card{background:#111827;border:1px solid #243247;border-radius:8px;padding:12px;margin-bottom:12px;min-width:0;max-width:100%;overflow:hidden}
 .card h3{margin:0 0 8px 0;color:#93c5fd;font-size:13px;overflow-wrap:anywhere}
 img.foto{max-width:100%;width:auto;max-height:310px;border-radius:6px;display:block;margin:0 auto;background:#000}
+.endereco-bar{margin-top:8px;padding:7px 10px;border-radius:6px;background:#0f172a;border:1px solid #1e3a8a;color:#bae6fd;font-size:12px;overflow-wrap:anywhere}
 .botoes{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center;max-width:100%}
 button{padding:7px 11px;border:none;border-radius:6px;cursor:pointer;font-weight:600;color:#fff;font-size:12px;max-width:100%}
 .b-bravo{background:#dc2626}.b-arq{background:#2563eb}.b-desarq{background:#059669}.b-prev{background:#334155}
@@ -944,6 +974,7 @@ select,input{background:#0b101b;color:#fff;border:1px solid #334155;border-radiu
     <h3>CAMPO DE VISAO DO GUARDIAO</h3>
     <img id="foto" class="foto" src="/imagem" alt="Imagem analisada">
     <div id="meta" style="font-size:11px;color:#94a3b8;margin-top:6px;overflow-wrap:anywhere"></div>
+    <div id="enderecoBox" class="endereco-bar" style="display:none"></div>
     <div id="statusEnvio" class="envio-ok" style="display:none"></div>
     <div class="botoes">
       <select id="selUnidade">
@@ -1021,10 +1052,18 @@ async function atualizar(){
   document.getElementById("ciclo").textContent = fmtSeg(d.restante) + (d.pausado ? " [PAUSADO]" : "");
   const a = d.atual;
   const badgeEnv = document.getElementById("statusEnvio");
+  const endBox = document.getElementById("enderecoBox");
   if(a){
     window._atualId = a.id;
     document.getElementById("foto").src = "/imagem?t=" + encodeURIComponent(a.id + "_" + a.situacao_fluxo + "_" + (a.modo_analise || ""));
     document.getElementById("meta").textContent = "ID: "+a.id+" | "+a.arquivo+" ("+a.indice+"/"+a.total+") | "+a.situacao_fluxo+" | "+(a.modo_analise||"");
+    if(a.endereco){
+      endBox.style.display = "block";
+      endBox.innerHTML = "<b>ENDERECO DA OCORRENCIA:</b> " + esc(a.endereco);
+    } else {
+      endBox.style.display = "none";
+      endBox.innerHTML = "";
+    }
     if(a.unidade_bravo){
       badgeEnv.style.display = "block";
       badgeEnv.textContent = "DESPACHO CONFIRMADO: " + a.unidade_bravo;
@@ -1042,6 +1081,7 @@ async function atualizar(){
     const cls = (a.nivel==="ALTO_RISCO"||a.nivel==="ATENCAO_ELEVADA")?"crit":(a.nivel==="OBSERVACAO"||a.nivel==="REGISTRO_OBJETO"?"med":"seg");
     document.getElementById("relatorio").innerHTML =
       "<div class='"+cls+"'><b>NIVEL:</b> "+esc(a.nivel)+" | <b>STATUS:</b> "+esc(a.status)+" | <b>PESSOAS:</b> "+esc(a.pessoas_visiveis ?? 0)+" | <b>MODO:</b> "+esc(a.modo_analise || "SENSOR_VISUAL")+"</div>"+
+      (a.endereco ? "<div class='linha-rel'><b>ENDERECO DA OCORRENCIA:</b> "+esc(a.endereco)+"</div>" : "")+
       "<div class='linha-rel'><b>SINTESE OPERACIONAL (ALFA):</b> "+esc(a.sintese_operacional || a.relato_visual)+"</div>"+
       "<div class='linha-rel'><b>ELEMENTOS / OBJETOS VISIVEIS:</b> "+objs+"</div>"+
       "<div class='linha-rel'><b>RELATO COMPLETO DA CENA:</b> "+esc(a.relato_visual)+"</div>"+
@@ -1049,6 +1089,7 @@ async function atualizar(){
       "<div class='linha-rel'><b>AMBIENTE / TELEMETRIA:</b> "+esc(a.detalhes_cena)+"</div>"+
       (a.retorno_bravo ? "<div class='linha-rel'><b>RETORNO BRAVO:</b> "+esc(a.retorno_bravo)+"</div>" : "");
   } else {
+    endBox.style.display = "none";
     badgeEnv.style.display = "none";
     document.getElementById("meta").textContent = "Aguardando proxima ocorrencia...";
     document.getElementById("relatorio").innerHTML = "Nenhuma ocorrencia ativa no momento.";
