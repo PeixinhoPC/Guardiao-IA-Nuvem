@@ -144,20 +144,6 @@ def listar_imagens():
     return filtradas or encontradas
 
 
-def _resumo_proxima_ocorrencia():
-    imagens = listar_imagens()
-    if not imagens:
-        return None
-    prox_idx = (STATE["indice"] + 1) % len(imagens)
-    arq = imagens[prox_idx]
-    return {
-        "indice": prox_idx + 1,
-        "total": len(imagens),
-        "arquivo": arq.name,
-        "endereco": obter_endereco_ocorrencia(prox_idx, arq.name)
-    }
-
-
 STATE = {
     "indice": -1,
     "atual": None,
@@ -685,6 +671,7 @@ def _registrar_ocorrencia(arq: Path, indice_zero: int, total: int, analise: dict
         "arquivo": arq.name,
         "caminho": str(arq),
         "situacao_fluxo": "ATIVA",
+        "acompanhando": False,
         "unidade_bravo": "",
         "retorno_bravo": "",
         **analise
@@ -811,7 +798,6 @@ async def get_imagem():
 @app.get("/api/estado")
 async def api_estado():
     restante = max(0, int(INTERVALO_SEG - (time.time() - STATE["ultima_troca"]))) if not STATE["pausado"] else int(INTERVALO_SEG)
-    arquivadas = [o for o in STATE["historico"] if o.get("situacao_fluxo") == "ARQUIVADA"]
     agora = agora_br()
     return {
         "agora": agora.strftime("%d/%m/%Y — %H:%M:%S"),
@@ -819,8 +805,6 @@ async def api_estado():
         "pausado": STATE["pausado"],
         "modo_demo_retorno": MODO_DEMO_RETORNO_BRAVO,
         "atual": STATE["atual"],
-        "proxima": _resumo_proxima_ocorrencia(),
-        "arquivadas": arquivadas[-40:],
         "mensagens": STATE["mensagens"][-40:],
         "retorno_bravo": STATE["retorno_bravo"][-30:]
     }
@@ -846,6 +830,35 @@ async def enviar_bravo(req: Request):
     if MODO_DEMO_RETORNO_BRAVO:
         asyncio.create_task(simular_retorno_bravo_demo(oc_id, unidade, endereco))
     return {"ok": True, "unidade": unidade, "endereco": endereco, "envio": envio_txt}
+
+
+@app.post("/api/acompanhar")
+async def acompanhar_ocorrencia(req: Request):
+    dados = await req.json()
+    oc_id = dados.get("id") or (STATE["atual"]["id"] if STATE["atual"] else "")
+    hora = agora_br().strftime("%H:%M:%S")
+    acompanhando = True
+    for o in STATE["historico"]:
+        if o["id"] == oc_id:
+            acompanhando = not bool(o.get("acompanhando"))
+            o["acompanhando"] = acompanhando
+            if acompanhando:
+                o["situacao_fluxo"] = "EM ACOMPANHAMENTO"
+    if STATE["atual"] and STATE["atual"]["id"] == oc_id:
+        STATE["atual"]["acompanhando"] = acompanhando
+        if acompanhando:
+            STATE["atual"]["situacao_fluxo"] = "EM ACOMPANHAMENTO"
+            STATE["pausado"] = True
+        else:
+            STATE["pausado"] = False
+            STATE["ultima_troca"] = time.time()
+    STATE["mensagens"].append({
+        "origem": "ALFA",
+        "hora": hora,
+        "texto": f"Ocorrencia {oc_id} {'em acompanhamento ate a solucao' if acompanhando else 'liberada do acompanhamento'}."
+    })
+    STATE["mensagens"] = STATE["mensagens"][-150:]
+    return {"ok": True, "acompanhando": acompanhando, "pausado": STATE["pausado"]}
 
 
 @app.post("/api/ocorrencia-anterior")
@@ -878,6 +891,8 @@ async def arquivar(req: Request):
     for o in STATE["historico"]:
         if o["id"] == oc_id:
             o["situacao_fluxo"] = "ARQUIVADA"
+            o["acompanhando"] = False
+    STATE["pausado"] = False
     STATE["atual"] = None
     await avancar_ciclo()
     return {"ok": True}
@@ -948,19 +963,13 @@ header>div{min-width:0;max-width:100%;overflow-wrap:anywhere}
 .wrap{max-width:980px;margin:0 auto;padding:12px;width:100%}
 .card{background:#111827;border:1px solid #243247;border-radius:8px;padding:12px;margin-bottom:12px;min-width:0;max-width:100%;overflow:hidden}
 .card h3{margin:0 0 8px 0;color:#93c5fd;font-size:13px;overflow-wrap:anywhere}
-.visao-grid{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:12px;align-items:start}
-@media(max-width:760px){.visao-grid{grid-template-columns:1fr}}
-img.foto{max-width:100%;width:100%;max-height:310px;object-fit:contain;border-radius:6px;display:block;margin:0;background:#000}
-.prox-box{background:#0b101b;border:1px solid #1e3a8a;border-radius:6px;padding:10px;min-width:0;overflow-wrap:anywhere}
-.prox-titulo{font-size:12px;font-weight:700;color:#93c5fd;margin-bottom:6px}
-.prox-linha{font-size:12px;margin-top:5px;line-height:1.35;color:#e2e8f0}
+img.foto{max-width:100%;width:auto;max-height:310px;border-radius:6px;display:block;margin:0;background:#000}
 .endereco-bar{margin-top:8px;padding:7px 10px;border-radius:6px;background:#0f172a;border:1px solid #1e3a8a;color:#bae6fd;font-size:12px;overflow-wrap:anywhere}
 .botoes{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center;max-width:100%}
 button{padding:7px 11px;border:none;border-radius:6px;cursor:pointer;font-weight:600;color:#fff;font-size:12px;max-width:100%}
-.b-bravo{background:#dc2626}.b-arq{background:#2563eb}.b-desarq{background:#059669}.b-prev{background:#334155}
+.b-bravo{background:#dc2626}.b-arq{background:#2563eb}.b-desarq{background:#059669}.b-prev{background:#334155}.b-acomp{background:#d97706}.b-acomp-ativo{background:#047857}
 select,input{background:#0b101b;color:#fff;border:1px solid #334155;border-radius:6px;padding:6px 8px;font-size:12px;min-width:0;max-width:100%}
 .box{background:#0b101b;border:1px solid #1e293b;border-radius:6px;padding:8px;max-height:260px;overflow-y:auto;overflow-x:hidden;font-size:12px;overflow-wrap:anywhere;word-break:break-word;max-width:100%}
-.item{border-bottom:1px solid #1e293b;padding:5px 0}
 .linha-rel{margin-top:5px;line-height:1.4}
 .crit{color:#fca5a5}.med{color:#fcd34d}.seg{color:#86efac}
 .envio-ok{margin-top:8px;padding:7px 10px;border-radius:6px;background:#064e3b;border:1px solid #10b981;color:#a7f3d0;font-size:12px;font-weight:700}
@@ -975,16 +984,8 @@ select,input{background:#0b101b;color:#fff;border:1px solid #334155;border-radiu
 <div class="wrap">
   <div class="card">
     <h3>CAMPO DE VISAO</h3>
-    <div class="visao-grid">
-      <div>
-        <img id="foto" class="foto" src="/imagem" alt="Imagem analisada">
-        <div id="meta" style="font-size:11px;color:#94a3b8;margin-top:6px;overflow-wrap:anywhere"></div>
-      </div>
-      <div class="prox-box">
-        <div class="prox-titulo">PROXIMA OCORRENCIA</div>
-        <div id="proxConteudo" class="prox-linha">Aguardando proxima ocorrencia...</div>
-      </div>
-    </div>
+    <img id="foto" class="foto" src="/imagem" alt="Imagem analisada">
+    <div id="meta" style="font-size:11px;color:#94a3b8;margin-top:6px;overflow-wrap:anywhere"></div>
     <div id="enderecoBox" class="endereco-bar" style="display:none"></div>
     <div id="statusEnvio" class="envio-ok" style="display:none"></div>
     <div id="retornoDestaque" class="retorno-destaque" style="display:none"></div>
@@ -998,6 +999,7 @@ select,input{background:#0b101b;color:#fff;border:1px solid #334155;border-radiu
         <option value="PMDF - APOIO">PMDF - APOIO</option>
       </select>
       <button class="b-bravo" onclick="enviarBravo()">ENVIAR BRAVO</button>
+      <button id="btnAcompanhar" class="b-acomp" onclick="acompanharOcorrencia()">ACOMPANHAR OCORRENCIA</button>
       <button class="b-arq" onclick="arquivarAtual()">ARQUIVAR OCORRENCIA</button>
       <button class="b-prev" onclick="ocorrenciaAnterior()">OCORRENCIA ANTERIOR</button>
     </div>
@@ -1014,7 +1016,6 @@ select,input{background:#0b101b;color:#fff;border:1px solid #334155;border-radiu
       <button class="b-desarq" onclick="desarquivar()">DESARQUIVAR PERIODO</button>
       <span id="msgDesarq" style="font-size:12px;color:#6ee7b7"></span>
     </div>
-    <div id="listaArq" class="box" style="margin-top:8px;max-height:120px"></div>
   </div>
 </div>
 <script>
@@ -1025,6 +1026,11 @@ async function enviarBravo(){
   const id = window._atualId || "";
   const unidade = document.getElementById("selUnidade").value;
   await fetch("/api/enviar-bravo",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,unidade})});
+  atualizar();
+}
+async function acompanharOcorrencia(){
+  const id = window._atualId || "";
+  await fetch("/api/acompanhar",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})});
   atualizar();
 }
 async function arquivarAtual(){
@@ -1049,36 +1055,21 @@ function fmtSeg(s){
   const r = String(s%60).padStart(2,"0");
   return m+":"+r;
 }
-function rolarBaixo(el){
-  if(!el) return;
-  const pertoDoFim = (el.scrollHeight - el.scrollTop - el.clientHeight) < 40;
-  if(pertoDoFim || el.dataset.init !== "1"){
-    el.scrollTop = el.scrollHeight;
-    el.dataset.init = "1";
-  }
-}
 async function atualizar(){
   const r = await fetch("/api/estado");
   const d = await r.json();
   document.getElementById("relogio").textContent = d.agora;
   document.getElementById("ciclo").textContent = fmtSeg(d.restante) + (d.pausado ? " [PAUSADO]" : "");
-  const prox = d.proxima;
-  const proxEl = document.getElementById("proxConteudo");
-  if(prox){
-    proxEl.innerHTML =
-      "<div><b>SEQUENCIA:</b> " + esc(prox.indice) + "/" + esc(prox.total) + "</div>" +
-      "<div class='prox-linha'><b>ENDERECO PREVISTO:</b> " + esc(prox.endereco) + "</div>" +
-      "<div class='prox-linha'><b>REGISTRO:</b> " + esc(prox.arquivo) + "</div>" +
-      "<div class='prox-linha'><b>TROCA EM:</b> " + fmtSeg(d.restante) + "</div>";
-  } else {
-    proxEl.textContent = "Aguardando proxima ocorrencia...";
-  }
   const a = d.atual;
   const badgeEnv = document.getElementById("statusEnvio");
   const endBox = document.getElementById("enderecoBox");
   const retBox = document.getElementById("retornoDestaque");
+  const btnAcomp = document.getElementById("btnAcompanhar");
   if(a){
     window._atualId = a.id;
+    const acompAtivo = Boolean(a.acompanhando);
+    btnAcomp.textContent = acompAtivo ? "ACOMPANHANDO OCORRENCIA" : "ACOMPANHAR OCORRENCIA";
+    btnAcomp.className = acompAtivo ? "b-acomp-ativo" : "b-acomp";
     document.getElementById("foto").src = "/imagem?t=" + encodeURIComponent(a.id + "_" + a.situacao_fluxo + "_" + (a.modo_analise || ""));
     document.getElementById("meta").textContent = "ID: "+a.id+" | "+a.arquivo+" ("+a.indice+"/"+a.total+") | "+a.situacao_fluxo;
     if(a.endereco){
@@ -1119,15 +1110,14 @@ async function atualizar(){
       "<div class='linha-rel'><b>CONDICAO DO LOCAL:</b> "+esc(a.detalhes_cena)+"</div>"+
       (a.retorno_bravo ? "<div class='linha-rel "+cls+"'><b>RETORNO BRAVO:</b> "+esc(a.retorno_bravo)+"</div>" : "");
   } else {
+    btnAcomp.textContent = "ACOMPANHAR OCORRENCIA";
+    btnAcomp.className = "b-acomp";
     endBox.style.display = "none";
     badgeEnv.style.display = "none";
     retBox.style.display = "none";
     document.getElementById("meta").textContent = "Aguardando proxima ocorrencia...";
     document.getElementById("relatorio").innerHTML = "Nenhuma ocorrencia ativa no momento.";
   }
-  const listaArq = document.getElementById("listaArq");
-  listaArq.innerHTML = (d.arquivadas||[]).map(x => "<div class='item'>[ARQUIVADA] <b>"+esc(x.id)+"</b> — "+esc(x.data_hora)+" — "+esc(x.arquivo)+"</div>").join("");
-  rolarBaixo(listaArq);
 }
 atualizar();
 setInterval(atualizar, 1000);
