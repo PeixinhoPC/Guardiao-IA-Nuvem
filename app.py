@@ -29,10 +29,7 @@ _MODELOS_CACHE = {
     "chave": ""
 }
 
-_MODELOS_INDISPONIVEIS = {
-    "pares": set(),
-    "expira": 0.0
-}
+_MODELOS_INEXISTENTES_404 = set()
 
 TERMOS_BLOQUEADOS_VISAO = (
     "tts",
@@ -46,12 +43,16 @@ TERMOS_BLOQUEADOS_VISAO = (
     "robotics",
     "computer-use",
     "aqa",
-    "preview",
-    "exp",
-    "3.1",
-    "3.5",
-    "2.5-flash-lite",
     "thinking"
+)
+
+TERMOS_REDUCAO_50 = (
+    "carteira",
+    "couro",
+    "celular",
+    "smartphone",
+    "iphone",
+    "telefone"
 )
 
 
@@ -76,16 +77,8 @@ def _modelo_bloqueado(nome: str) -> bool:
     return any(t in n for t in TERMOS_BLOQUEADOS_VISAO)
 
 
-def _limpar_indisponiveis_se_expirado():
-    agora = time.time()
-    if agora >= _MODELOS_INDISPONIVEIS["expira"]:
-        _MODELOS_INDISPONIVEIS["pares"].clear()
-        _MODELOS_INDISPONIVEIS["expira"] = agora + 1800.0
-
-
-def _remover_modelo_definitivo(modelo: str, ver: str):
-    _limpar_indisponiveis_se_expirado()
-    _MODELOS_INDISPONIVEIS["pares"].add((modelo, ver))
+def _remover_modelo_404(modelo: str, ver: str):
+    _MODELOS_INEXISTENTES_404.add((modelo, ver))
     if _MODELOS_CACHE["lista"]:
         _MODELOS_CACHE["lista"] = [
             item for item in _MODELOS_CACHE["lista"]
@@ -95,6 +88,11 @@ def _remover_modelo_definitivo(modelo: str, ver: str):
 
 def agora_br() -> datetime:
     return datetime.now(TZ_BR)
+
+
+def _eh_item_reduzido(nome_arquivo: str) -> bool:
+    n = (nome_arquivo or "").lower()
+    return any(t in n for t in TERMOS_REDUCAO_50)
 
 
 def listar_imagens():
@@ -110,7 +108,17 @@ def listar_imagens():
                     if chave not in vistos:
                         vistos.add(chave)
                         encontradas.append(arq)
-    return encontradas
+
+    filtradas = []
+    contador_reduzidos = 0
+    for arq in encontradas:
+        if _eh_item_reduzido(arq.name):
+            contador_reduzidos += 1
+            if contador_reduzidos % 2 == 0:
+                continue
+        filtradas.append(arq)
+
+    return filtradas or encontradas
 
 
 STATE = {
@@ -190,9 +198,9 @@ def inspecionar_imagem(caminho: Path):
                 razao_regiao = max(1, max_x - min_x + 1) / float(max(1, max_y - min_y + 1))
 
             otimizada = im_rgb.copy()
-            otimizada.thumbnail((800, 800))
+            otimizada.thumbnail((720, 720))
             buf = BytesIO()
-            otimizada.save(buf, format="JPEG", quality=80, optimize=True)
+            otimizada.save(buf, format="JPEG", quality=75, optimize=True)
             b64_data = base64.b64encode(buf.getvalue()).decode("utf-8")
     except Exception as exc:
         obs_cena.append(f"Leitura visual com restricao: {exc}")
@@ -255,14 +263,13 @@ def desenhar_retangulo_arma(caminho: Path, caixa, rotulo: str = "ARMA") -> bytes
 
 
 def obter_modelos_disponiveis(chave: str):
-    _limpar_indisponiveis_se_expirado()
     agora = time.time()
     if (
         _MODELOS_CACHE["lista"]
         and _MODELOS_CACHE["chave"] == chave
         and agora < _MODELOS_CACHE["expira"]
     ):
-        return [p for p in _MODELOS_CACHE["lista"] if p not in _MODELOS_INDISPONIVEIS["pares"]]
+        return [p for p in _MODELOS_CACHE["lista"] if p not in _MODELOS_INEXISTENTES_404]
 
     descobertos = []
     if chave:
@@ -279,7 +286,7 @@ def obter_modelos_disponiveis(chave: str):
                         if nome and "generateContent" in metodos:
                             if "gemini" in nome.lower() and not _modelo_bloqueado(nome):
                                 par = (nome, ver)
-                                if par not in descobertos and par not in _MODELOS_INDISPONIVEIS["pares"]:
+                                if par not in descobertos and par not in _MODELOS_INEXISTENTES_404:
                                     descobertos.append(par)
                     if descobertos:
                         break
@@ -292,20 +299,30 @@ def obter_modelos_disponiveis(chave: str):
     if modelo_env:
         for ver in ("v1beta", "v1"):
             par = (modelo_env, ver)
-            if par not in prioritarios and par not in _MODELOS_INDISPONIVEIS["pares"]:
+            if par not in prioritarios and par not in _MODELOS_INEXISTENTES_404:
                 prioritarios.append(par)
 
-    for m_pref in ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-latest", "gemini-2.0-flash-lite", "gemini-flash-lite-latest"):
+    for m_pref in (
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-flash-latest",
+        "gemini-2.5-flash-lite",
+        "gemini-2.0-flash-lite",
+        "gemini-flash-lite-latest",
+        "gemini-3.1-flash-lite",
+        "gemini-3.1-flash-lite-preview",
+        "gemini-3.5-flash-lite"
+    ):
         for ver in ("v1beta", "v1"):
             par = (m_pref, ver)
-            if par not in prioritarios and par not in _MODELOS_INDISPONIVEIS["pares"]:
+            if par not in prioritarios and par not in _MODELOS_INEXISTENTES_404:
                 prioritarios.append(par)
 
     for par in descobertos:
-        if par not in prioritarios and par not in _MODELOS_INDISPONIVEIS["pares"]:
+        if par not in prioritarios and par not in _MODELOS_INEXISTENTES_404:
             prioritarios.append(par)
 
-    fila_final = prioritarios[:6]
+    fila_final = prioritarios[:10]
     print(f"[GUARDIAO] Fila de modelos estaveis ativa: {fila_final}", flush=True)
     _MODELOS_CACHE["lista"] = fila_final
     _MODELOS_CACHE["expira"] = agora + 1800.0
@@ -449,65 +466,57 @@ def _chamar_visao_sync(mime: str, img_b64: str):
     fila = obter_modelos_disponiveis(chave)
     for modelo, ver in fila:
         url = f"https://generativelanguage.googleapis.com/{ver}/models/{modelo}:generateContent?key={chave}"
-        for tentativa in range(2):
-            try:
-                resp = requests.post(url, json=payload, timeout=25)
-                if resp.status_code == 404:
-                    _remover_modelo_definitivo(modelo, ver)
-                    ultimo_erro = f"Modelo {modelo} removido ({ver})"
-                    print(f"[GUARDIAO] {ultimo_erro}", flush=True)
-                    break
-                if resp.status_code in (400, 401, 403):
-                    msg = f"Falha de autorizacao/chave (HTTP {resp.status_code})"
-                    print(f"[GUARDIAO] {msg} em {modelo} ({ver}): {resp.text[:180]}", flush=True)
-                    return None, msg
-                if resp.status_code == 429:
-                    ultimo_erro = "Cota/requisicoes limitadas no momento (HTTP 429)"
-                    print(f"[GUARDIAO] {ultimo_erro} em {modelo} ({ver}) tentativa {tentativa + 1}/2", flush=True)
-                    time.sleep(2.0 * (tentativa + 1))
-                    continue
-                if resp.status_code in (500, 502, 503, 504):
-                    _remover_modelo_definitivo(modelo, ver)
-                    ultimo_erro = f"Modelo {modelo} removido por erro HTTP {resp.status_code} ({ver})"
-                    print(f"[GUARDIAO] {ultimo_erro}", flush=True)
-                    break
-                resp.raise_for_status()
-                data = resp.json()
-                candidatos = data.get("candidates") or []
-                if not candidatos:
-                    ultimo_erro = "Resposta sem candidatos"
-                    break
-                partes = (candidatos[0].get("content") or {}).get("parts") or []
-                texto_resp = "".join(str(p.get("text", "")) for p in partes if isinstance(p, dict)).strip()
-                parsed = extrair_json_robusto(texto_resp)
-                if parsed is not None:
-                    print(f"[GUARDIAO] Analise concluida via {modelo} ({ver}).", flush=True)
-                    return parsed, ""
-                if texto_resp:
-                    print(f"[GUARDIAO] Resposta em texto livre via {modelo} ({ver}).", flush=True)
-                    return {
-                        "arma_fogo": False,
-                        "arma_branca": False,
-                        "atitude_ameaca": False,
-                        "objeto_na_mao": "",
-                        "pessoas_visiveis": 0,
-                        "nivel_sugerido": "OBSERVACAO",
-                        "objetos": [],
-                        "sintese_operacional": texto_resp[:220],
-                        "relato_detalhado": texto_resp,
-                        "pontos_atencao": [],
-                        "caixa_arma": None
-                    }, ""
-                break
-            except requests.exceptions.Timeout:
-                _remover_modelo_definitivo(modelo, ver)
-                ultimo_erro = f"Modelo {modelo} removido por Timeout ({ver})"
-                print(f"[GUARDIAO] {ultimo_erro}", flush=True)
-                break
-            except Exception as exc:
-                ultimo_erro = f"Erro de conexao: {type(exc).__name__}"
-                print(f"[GUARDIAO] Falha em {modelo} ({ver}) tentativa {tentativa + 1}/2: {exc}", flush=True)
-                time.sleep(1.0)
+        try:
+            resp = requests.post(url, json=payload, timeout=18)
+            if resp.status_code == 404:
+                _remover_modelo_404(modelo, ver)
+                ultimo_erro = f"Modelo {modelo} inexistente (404)"
+                print(f"[GUARDIAO] {ultimo_erro} em {ver}", flush=True)
+                continue
+            if resp.status_code in (400, 401, 403):
+                msg = f"Falha de autorizacao/chave (HTTP {resp.status_code})"
+                print(f"[GUARDIAO] {msg} em {modelo} ({ver}): {resp.text[:180]}", flush=True)
+                return None, msg
+            if resp.status_code in (429, 500, 502, 503, 504):
+                ultimo_erro = f"Instabilidade temporaria (HTTP {resp.status_code}) em {modelo}"
+                print(f"[GUARDIAO] {ultimo_erro} ({ver}) — pulando para proximo modelo", flush=True)
+                time.sleep(0.6)
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            candidatos = data.get("candidates") or []
+            if not candidatos:
+                ultimo_erro = f"Sem candidatos em {modelo}"
+                continue
+            partes = (candidatos[0].get("content") or {}).get("parts") or []
+            texto_resp = "".join(str(p.get("text", "")) for p in partes if isinstance(p, dict)).strip()
+            parsed = extrair_json_robusto(texto_resp)
+            if parsed is not None:
+                print(f"[GUARDIAO] Analise concluida via {modelo} ({ver}).", flush=True)
+                return parsed, ""
+            if texto_resp:
+                print(f"[GUARDIAO] Resposta em texto livre via {modelo} ({ver}).", flush=True)
+                return {
+                    "arma_fogo": False,
+                    "arma_branca": False,
+                    "atitude_ameaca": False,
+                    "objeto_na_mao": "",
+                    "pessoas_visiveis": 0,
+                    "nivel_sugerido": "OBSERVACAO",
+                    "objetos": [],
+                    "sintese_operacional": texto_resp[:220],
+                    "relato_detalhado": texto_resp,
+                    "pontos_atencao": [],
+                    "caixa_arma": None
+                }, ""
+        except requests.exceptions.Timeout:
+            ultimo_erro = f"Timeout em {modelo} ({ver})"
+            print(f"[GUARDIAO] {ultimo_erro} — pulando para proximo modelo", flush=True)
+            continue
+        except Exception as exc:
+            ultimo_erro = f"Falha em {modelo}: {type(exc).__name__}"
+            print(f"[GUARDIAO] {ultimo_erro} ({ver}): {exc}", flush=True)
+            continue
 
     print(f"[GUARDIAO] Fallback acionado: {ultimo_erro}", flush=True)
     return None, ultimo_erro
@@ -625,6 +634,34 @@ async def analisar_imagem_ia(caminho: Path):
     }
 
 
+def _registrar_ocorrencia(arq: Path, indice_zero: int, total: int, analise: dict):
+    agora = agora_br()
+    oc = {
+        "id": f"OC-{agora.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4].upper()}",
+        "iso_dt": agora.isoformat(),
+        "data_hora": agora.strftime("%d/%m/%Y %H:%M:%S"),
+        "indice": indice_zero + 1,
+        "total": total,
+        "arquivo": arq.name,
+        "caminho": str(arq),
+        "situacao_fluxo": "ATIVA",
+        "unidade_bravo": "",
+        "retorno_bravo": "",
+        **analise
+    }
+    STATE["atual"] = oc
+    STATE["ultima_troca"] = time.time()
+    STATE["historico"].append(oc)
+    STATE["historico"] = STATE["historico"][-300:]
+    STATE["mensagens"].append({
+        "origem": "GUARDIAO",
+        "hora": agora.strftime("%H:%M:%S"),
+        "texto": f"[{oc['id']}] {oc['nivel']} — {oc['sintese_operacional']}"
+    })
+    STATE["mensagens"] = STATE["mensagens"][-150:]
+    return oc
+
+
 async def avancar_ciclo():
     imagens = listar_imagens()
     if not imagens:
@@ -638,41 +675,42 @@ async def avancar_ciclo():
         info = await asyncio.to_thread(inspecionar_imagem, arq)
         analise = analise_visual_fallback(info, f"Falha inesperada: {type(exc).__name__}")
 
-    agora = agora_br()
-    oc = {
-        "id": f"OC-{agora.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4].upper()}",
-        "iso_dt": agora.isoformat(),
-        "data_hora": agora.strftime("%d/%m/%Y %H:%M:%S"),
-        "indice": STATE["indice"] + 1,
-        "total": len(imagens),
-        "arquivo": arq.name,
-        "caminho": str(arq),
-        "situacao_fluxo": "ATIVA",
-        "retorno_bravo": "",
-        **analise
-    }
-
-    STATE["atual"] = oc
-    STATE["ultima_troca"] = time.time()
-    STATE["historico"].append(oc)
-    STATE["historico"] = STATE["historico"][-300:]
-    STATE["mensagens"].append({
-        "origem": "GUARDIAO",
-        "hora": agora.strftime("%H:%M:%S"),
-        "texto": f"[{oc['id']}] {oc['nivel']} — {oc['sintese_operacional']}"
-    })
-    STATE["mensagens"] = STATE["mensagens"][-150:]
+    _registrar_ocorrencia(arq, STATE["indice"], len(imagens), analise)
 
 
-async def simular_retorno_bravo_demo(oc_id: str):
+async def voltar_ocorrencia_anterior():
+    ativas = [o for o in STATE["historico"] if o.get("situacao_fluxo") != "ARQUIVADA"]
+    atual_id = STATE["atual"]["id"] if STATE["atual"] else ""
+    if len(ativas) >= 2:
+        idx_atual = next((i for i, o in enumerate(ativas) if o["id"] == atual_id), len(ativas) - 1)
+        idx_prev = idx_atual - 1 if idx_atual > 0 else len(ativas) - 1
+        anterior = dict(ativas[idx_prev])
+        STATE["atual"] = anterior
+        STATE["ultima_troca"] = time.time()
+        return anterior
+
+    imagens = listar_imagens()
+    if not imagens:
+        return STATE["atual"]
+    STATE["indice"] = (STATE["indice"] - 1) % len(imagens)
+    arq = imagens[STATE["indice"]]
+    try:
+        analise = await analisar_imagem_ia(arq)
+    except Exception as exc:
+        info = await asyncio.to_thread(inspecionar_imagem, arq)
+        analise = analise_visual_fallback(info, f"Falha inesperada: {type(exc).__name__}")
+    return _registrar_ocorrencia(arq, STATE["indice"], len(imagens), analise)
+
+
+async def simular_retorno_bravo_demo(oc_id: str, unidade: str = "BRAVO"):
     if not MODO_DEMO_RETORNO_BRAVO:
         return
     await asyncio.sleep(8)
     hora = agora_br().strftime("%H:%M:%S")
     relatos = [
-        "[DEMO] Equipe BRAVO em deslocamento ate o ponto informado pelo ALFA.",
-        "[DEMO] Equipe BRAVO no local; averiguacao em andamento.",
-        "[DEMO] Equipe BRAVO concluiu averiguacao inicial e aguarda diretriz do ALFA."
+        f"[DEMO] Unidade {unidade} em deslocamento ate o ponto informado pelo ALFA.",
+        f"[DEMO] Unidade {unidade} no local; averiguacao em andamento.",
+        f"[DEMO] Unidade {unidade} concluiu averiguacao inicial e aguarda diretriz do ALFA."
     ]
     txt = random.choice(relatos)
     STATE["retorno_bravo"].append({"hora": hora, "ocorrencia_id": oc_id, "texto": txt})
@@ -748,17 +786,27 @@ async def api_estado():
 async def enviar_bravo(req: Request):
     dados = await req.json()
     oc_id = dados.get("id") or (STATE["atual"]["id"] if STATE["atual"] else "N/A")
+    unidade = (dados.get("unidade") or "BRAVO-01").strip()
     hora = agora_br().strftime("%H:%M:%S")
+    envio_txt = f"ENVIADO PARA {unidade} as {hora}"
     for o in STATE["historico"]:
         if o["id"] == oc_id:
-            o["situacao_fluxo"] = "ENVIADO_AO_BRAVO"
+            o["situacao_fluxo"] = f"ENVIADO ({unidade})"
+            o["unidade_bravo"] = envio_txt
     if STATE["atual"] and STATE["atual"]["id"] == oc_id:
-        STATE["atual"]["situacao_fluxo"] = "ENVIADO_AO_BRAVO"
-    STATE["mensagens"].append({"origem": "ALFA -> BRAVO", "hora": hora, "texto": f"Ocorrencia {oc_id} enviada a equipe BRAVO."})
+        STATE["atual"]["situacao_fluxo"] = f"ENVIADO ({unidade})"
+        STATE["atual"]["unidade_bravo"] = envio_txt
+    STATE["mensagens"].append({"origem": f"ALFA -> {unidade}", "hora": hora, "texto": f"Ocorrencia {oc_id} enviada para {unidade}."})
     STATE["mensagens"] = STATE["mensagens"][-150:]
     if MODO_DEMO_RETORNO_BRAVO:
-        asyncio.create_task(simular_retorno_bravo_demo(oc_id))
-    return {"ok": True}
+        asyncio.create_task(simular_retorno_bravo_demo(oc_id, unidade))
+    return {"ok": True, "unidade": unidade, "envio": envio_txt}
+
+
+@app.post("/api/ocorrencia-anterior")
+async def ocorrencia_anterior():
+    oc = await voltar_ocorrencia_anterior()
+    return {"ok": True, "atual": oc}
 
 
 @app.post("/api/retorno-bravo")
@@ -785,8 +833,8 @@ async def arquivar(req: Request):
     for o in STATE["historico"]:
         if o["id"] == oc_id:
             o["situacao_fluxo"] = "ARQUIVADA"
-    if STATE["atual"] and STATE["atual"]["id"] == oc_id:
-        await avancar_ciclo()
+    STATE["atual"] = None
+    await avancar_ciclo()
     return {"ok": True}
 
 
@@ -852,20 +900,19 @@ html,body{margin:0;padding:0;width:100%;max-width:100%;overflow-x:clip;backgroun
 header{background:#0d2545;padding:10px 14px;display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px;border-bottom:2px solid #2563eb;width:100%}
 header>div{min-width:0;max-width:100%;overflow-wrap:anywhere}
 .relogio{font-family:monospace;font-size:15px;color:#7dd3fc;font-weight:bold;white-space:nowrap}
-.grid{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:12px;padding:12px;width:100%;max-width:100%}
-.grid>div{min-width:0;max-width:100%}
-.card{background:#111827;border:1px solid #243247;border-radius:8px;padding:10px;margin-bottom:10px;min-width:0;max-width:100%;overflow:hidden}
+.wrap{max-width:980px;margin:0 auto;padding:12px;width:100%}
+.card{background:#111827;border:1px solid #243247;border-radius:8px;padding:12px;margin-bottom:12px;min-width:0;max-width:100%;overflow:hidden}
 .card h3{margin:0 0 8px 0;color:#93c5fd;font-size:13px;overflow-wrap:anywhere}
-img.foto{max-width:100%;width:auto;max-height:270px;border-radius:6px;display:block;margin:0 auto;background:#000}
+img.foto{max-width:100%;width:auto;max-height:310px;border-radius:6px;display:block;margin:0 auto;background:#000}
 .botoes{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center;max-width:100%}
-button{padding:7px 10px;border:none;border-radius:6px;cursor:pointer;font-weight:600;color:#fff;font-size:12px;max-width:100%}
-.b-bravo{background:#dc2626}.b-arq{background:#2563eb}.b-desarq{background:#059669}.b-pausa{background:#475569}.b-env{background:#0284c7}
-input{background:#0b101b;color:#fff;border:1px solid #334155;border-radius:6px;padding:6px;font-size:12px;min-width:0;max-width:100%}
-.box{background:#0b101b;border:1px solid #1e293b;border-radius:6px;padding:8px;max-height:220px;overflow-y:auto;overflow-x:hidden;font-size:12px;overflow-wrap:anywhere;word-break:break-word;max-width:100%}
+button{padding:7px 11px;border:none;border-radius:6px;cursor:pointer;font-weight:600;color:#fff;font-size:12px;max-width:100%}
+.b-bravo{background:#dc2626}.b-arq{background:#2563eb}.b-desarq{background:#059669}.b-prev{background:#334155}
+select,input{background:#0b101b;color:#fff;border:1px solid #334155;border-radius:6px;padding:6px 8px;font-size:12px;min-width:0;max-width:100%}
+.box{background:#0b101b;border:1px solid #1e293b;border-radius:6px;padding:8px;max-height:260px;overflow-y:auto;overflow-x:hidden;font-size:12px;overflow-wrap:anywhere;word-break:break-word;max-width:100%}
 .item{border-bottom:1px solid #1e293b;padding:5px 0}
 .linha-rel{margin-top:4px;line-height:1.35}
 .crit{color:#fca5a5}.med{color:#fcd34d}.seg{color:#86efac}
-@media(max-width:980px){.grid{grid-template-columns:minmax(0,1fr)}}
+.envio-ok{margin-top:8px;padding:7px 10px;border-radius:6px;background:#064e3b;border:1px solid #10b981;color:#a7f3d0;font-size:12px;font-weight:700}
 </style>
 </head>
 <body>
@@ -873,74 +920,59 @@ input{background:#0b101b;color:#fff;border:1px solid #334155;border-radius:6px;p
   <div><b>GUARDIAO DF-360 — SSPDF / DF-360</b> | Ciclo: <span id="ciclo">02:00</span></div>
   <div class="relogio" id="relogio">--/--/---- --:--:--</div>
 </header>
-<div class="grid">
-  <div>
-    <div class="card">
-      <h3>CAMPO DE VISAO DO GUARDIAO</h3>
-      <img id="foto" class="foto" src="/imagem" alt="Imagem analisada">
-      <div id="meta" style="font-size:11px;color:#94a3b8;margin-top:6px;overflow-wrap:anywhere"></div>
-      <div class="botoes">
-        <button class="b-bravo" onclick="acao('/api/enviar-bravo')">ENVIAR AO BRAVO</button>
-        <button class="b-arq" onclick="acao('/api/arquivar')">ARQUIVAR OCORRENCIA</button>
-        <button class="b-pausa" onclick="acao('/api/pausa')">PAUSAR / RETOMAR</button>
-      </div>
-    </div>
-    <div class="card">
-      <h3>RELATORIO SITUACIONAL DO GUARDIAO (DECISAO ALFA)</h3>
-      <div id="relatorio" class="box" style="max-height:260px"></div>
-    </div>
-    <div class="card">
-      <h3>DESARQUIVAR OCORRENCIA POR PERIODO</h3>
-      <div class="botoes">
-        <input type="datetime-local" id="dtIni">
-        <input type="datetime-local" id="dtFim">
-        <button class="b-desarq" onclick="desarquivar()">DESARQUIVAR PERIODO</button>
-        <span id="msgDesarq" style="font-size:12px;color:#6ee7b7"></span>
-      </div>
-      <div id="listaArq" class="box" style="margin-top:8px;max-height:115px"></div>
+<div class="wrap">
+  <div class="card">
+    <h3>CAMPO DE VISAO DO GUARDIAO</h3>
+    <img id="foto" class="foto" src="/imagem" alt="Imagem analisada">
+    <div id="meta" style="font-size:11px;color:#94a3b8;margin-top:6px;overflow-wrap:anywhere"></div>
+    <div id="statusEnvio" class="envio-ok" style="display:none"></div>
+    <div class="botoes">
+      <select id="selUnidade">
+        <option value="BRAVO-01">BRAVO-01</option>
+        <option value="BRAVO-02">BRAVO-02</option>
+        <option value="BRAVO-03">BRAVO-03</option>
+        <option value="ROTAM">ROTAM</option>
+        <option value="BPCHOQUE">BPCHOQUE</option>
+        <option value="PMDF - APOIO">PMDF - APOIO</option>
+      </select>
+      <button class="b-bravo" onclick="enviarBravo()">ENVIAR BRAVO</button>
+      <button class="b-arq" onclick="arquivarAtual()">ARQUIVAR OCORRENCIA</button>
+      <button class="b-prev" onclick="ocorrenciaAnterior()">OCORRENCIA ANTERIOR</button>
     </div>
   </div>
-  <div>
-    <div class="card">
-      <h3>RETORNO DO BRAVO <span id="badgeDemo" style="font-size:11px;color:#fbbf24"></span></h3>
-      <div class="botoes" style="margin-top:0;margin-bottom:8px">
-        <input type="text" id="txtBravo" placeholder="Retorno da equipe BRAVO..." style="flex:1 1 140px">
-        <button class="b-env" onclick="enviarRetornoBravo()">REGISTRAR RETORNO</button>
-      </div>
-      <div id="boxBravo" class="box"></div>
+  <div class="card">
+    <h3>RELATORIO SITUACIONAL DO GUARDIAO (DECISAO ALFA)</h3>
+    <div id="relatorio" class="box"></div>
+  </div>
+  <div class="card">
+    <h3>DESARQUIVAR OCORRENCIA POR PERIODO</h3>
+    <div class="botoes">
+      <input type="datetime-local" id="dtIni">
+      <input type="datetime-local" id="dtFim">
+      <button class="b-desarq" onclick="desarquivar()">DESARQUIVAR PERIODO</button>
+      <span id="msgDesarq" style="font-size:12px;color:#6ee7b7"></span>
     </div>
-    <div class="card">
-      <h3>COMUNICACAO — ALFA &lt;-&gt; GUARDIAO</h3>
-      <div class="botoes" style="margin-top:0;margin-bottom:8px">
-        <input type="text" id="txtMsg" placeholder="Mensagem do ALFA para o GUARDIAO..." style="flex:1 1 140px">
-        <button class="b-env" onclick="enviarMsg()">ENVIAR</button>
-      </div>
-      <div id="boxMsg" class="box" style="max-height:360px"></div>
-    </div>
+    <div id="listaArq" class="box" style="margin-top:8px;max-height:120px"></div>
   </div>
 </div>
 <script>
 function esc(s){
   return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 }
-async function acao(url){
+async function enviarBravo(){
   const id = window._atualId || "";
-  await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})});
+  const unidade = document.getElementById("selUnidade").value;
+  await fetch("/api/enviar-bravo",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,unidade})});
   atualizar();
 }
-async function enviarRetornoBravo(){
-  const t = document.getElementById("txtBravo").value.trim();
-  if(!t) return;
-  await fetch("/api/retorno-bravo",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({texto:t,oc_id:window._atualId||"GERAL"})});
-  document.getElementById("txtBravo").value = "";
-  atualizar();
+async function arquivarAtual(){
+  const id = window._atualId || "";
+  await fetch("/api/arquivar",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})});
+  await atualizar();
 }
-async function enviarMsg(){
-  const t = document.getElementById("txtMsg").value.trim();
-  if(!t) return;
-  await fetch("/api/mensagem",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({texto:t})});
-  document.getElementById("txtMsg").value = "";
-  atualizar();
+async function ocorrenciaAnterior(){
+  await fetch("/api/ocorrencia-anterior",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({})});
+  await atualizar();
 }
 async function desarquivar(){
   const inicio = document.getElementById("dtIni").value;
@@ -968,12 +1000,19 @@ async function atualizar(){
   const d = await r.json();
   document.getElementById("relogio").textContent = d.agora;
   document.getElementById("ciclo").textContent = fmtSeg(d.restante) + (d.pausado ? " [PAUSADO]" : "");
-  document.getElementById("badgeDemo").textContent = d.modo_demo_retorno ? "(DEMO — RETORNO REAL APOS APROVACAO)" : "(TEMPO REAL BRAVO)";
   const a = d.atual;
+  const badgeEnv = document.getElementById("statusEnvio");
   if(a){
     window._atualId = a.id;
     document.getElementById("foto").src = "/imagem?t=" + encodeURIComponent(a.id + "_" + a.situacao_fluxo + "_" + (a.modo_analise || ""));
     document.getElementById("meta").textContent = "ID: "+a.id+" | "+a.arquivo+" ("+a.indice+"/"+a.total+") | "+a.situacao_fluxo+" | "+(a.modo_analise||"");
+    if(a.unidade_bravo){
+      badgeEnv.style.display = "block";
+      badgeEnv.textContent = "DESPACHO CONFIRMADO: " + a.unidade_bravo;
+    } else {
+      badgeEnv.style.display = "none";
+      badgeEnv.textContent = "";
+    }
     const objs = (a.objetos||[]).map(x => {
       const rot = esc(x.rotulo || "");
       const det = x.detalhe ? " [" + esc(x.detalhe) + "]" : "";
@@ -990,15 +1029,13 @@ async function atualizar(){
       "<div class='linha-rel'><b>PONTOS DE ATENCAO:</b> "+pontos+"</div>"+
       "<div class='linha-rel'><b>AMBIENTE / TELEMETRIA:</b> "+esc(a.detalhes_cena)+"</div>"+
       (a.retorno_bravo ? "<div class='linha-rel'><b>RETORNO BRAVO:</b> "+esc(a.retorno_bravo)+"</div>" : "");
+  } else {
+    badgeEnv.style.display = "none";
+    document.getElementById("meta").textContent = "Aguardando proxima ocorrencia...";
+    document.getElementById("relatorio").innerHTML = "Nenhuma ocorrencia ativa no momento.";
   }
-  const boxBravo = document.getElementById("boxBravo");
-  const boxMsg = document.getElementById("boxMsg");
   const listaArq = document.getElementById("listaArq");
-  boxBravo.innerHTML = (d.retorno_bravo||[]).map(x => "<div class='item'>["+esc(x.hora)+"] <b>"+esc(x.ocorrencia_id)+":</b> "+esc(x.texto)+"</div>").join("");
-  boxMsg.innerHTML = (d.mensagens||[]).map(x => "<div class='item'>["+esc(x.hora)+"] <b>"+esc(x.origem)+":</b> "+esc(x.texto)+"</div>").join("");
   listaArq.innerHTML = (d.arquivadas||[]).map(x => "<div class='item'>[ARQUIVADA] <b>"+esc(x.id)+"</b> — "+esc(x.data_hora)+" — "+esc(x.arquivo)+"</div>").join("");
-  rolarBaixo(boxBravo);
-  rolarBaixo(boxMsg);
   rolarBaixo(listaArq);
 }
 atualizar();
