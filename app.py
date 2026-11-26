@@ -185,15 +185,6 @@ def inspecionar_imagem(caminho: Path):
             brilho = sum(st.mean) / 3.0
             contraste = sum(st.stddev) / 3.0
 
-            if brilho < 55:
-                obs_cena.append("Baixa luminosidade")
-            elif brilho > 215:
-                obs_cena.append("Alta luminosidade")
-            if contraste < 25:
-                obs_cena.append("Baixo contraste")
-            if min(img_w, img_h) < 180 or (img_w * img_h) < 60000:
-                obs_cena.append("Resolucao reduzida")
-
             pequena = im_rgb.copy()
             pequena.thumbnail((320, 320))
             pw, ph = pequena.size
@@ -225,20 +216,20 @@ def inspecionar_imagem(caminho: Path):
             buf = BytesIO()
             otimizada.save(buf, format="JPEG", quality=75, optimize=True)
             b64_data = base64.b64encode(buf.getvalue()).decode("utf-8")
-    except Exception as exc:
-        obs_cena.append(f"Leitura visual com restricao: {exc}")
+    except Exception:
         try:
             b64_data = base64.b64encode(caminho.read_bytes()).decode("utf-8")
         except Exception:
             b64_data = ""
 
-    if not obs_cena:
-        obs_cena.append("Enquadramento e iluminacao regulares")
+    if brilho < 55:
+        obs_cena.append("Ambiente com baixa luminosidade")
+    elif brilho > 215:
+        obs_cena.append("Ambiente bem iluminado")
+    else:
+        obs_cena.append("Iluminacao regular na cena")
 
-    detalhes = (
-        f"{img_w}x{img_h}px | Brilho {round(brilho, 1)} | "
-        f"Contraste {round(contraste, 1)} | " + " | ".join(obs_cena)
-    )
+    detalhes = " | ".join(obs_cena)
     return {
         "mime": mime,
         "b64": b64_data,
@@ -374,7 +365,7 @@ def obter_modelos_disponiveis(chave: str):
 
 def analise_visual_fallback(info: dict, motivo: str = ""):
     objetos = []
-    pontos = list(info.get("obs") or [])
+    pontos = []
     razao = info.get("razao", 1.0)
     bordas = info.get("bordas", 0.0)
     contraste = info.get("contraste", 0.0)
@@ -382,54 +373,41 @@ def analise_visual_fallback(info: dict, motivo: str = ""):
     if razao >= 2.2 and bordas >= 15.0 and contraste >= 25.0:
         conf = round(min(92.0, max(65.0, 60.0 + bordas * 0.4 + contraste * 0.15)), 1)
         objetos.append({
-            "rotulo": "Estrutura alongada na cena",
+            "rotulo": "Objeto alongado na cena",
             "confianca": f"{conf}%",
-            "detalhe": f"Proporcao horizontal {razao:.1f}:1 com contorno definido"
+            "detalhe": "Contorno alongado em destaque"
         })
         nivel = "OBSERVACAO"
         status = "OBSERVACAO_VISUAL"
-        sintese = f"Estrutura alongada identificada na imagem ({razao:.1f}:1); verificacao visual recomendada."
-        relato = (
-            f"A analise direta dos pixels evidencia elemento de formato alongado na cena "
-            f"(proporcao aproximada {razao:.1f}:1, densidade de contorno {bordas:.1f}). "
-            "Verifique o enquadramento para confirmacao da natureza exata do objeto."
-        )
-        pontos.append("Conferir elemento alongado em detalhe")
+        sintese = "Objeto alongado identificado na cena; verificacao operacional recomendada."
+        relato = "Ha um elemento de formato alongado em destaque na cena; recomenda-se conferencia visual para confirmar a natureza do objeto."
+        pontos.append("Confirmar natureza do objeto alongado")
     elif bordas >= 16.0:
         conf = round(min(86.0, max(58.0, 55.0 + bordas * 0.35)), 1)
         objetos.append({
-            "rotulo": "Elemento com contorno definido",
+            "rotulo": "Elemento visivel na cena",
             "confianca": f"{conf}%",
-            "detalhe": "Regiao de contraste/borda destacada no quadro"
+            "detalhe": "Contorno nitido"
         })
         nivel = "NORMAL"
         status = "REGISTRO_VISUAL"
-        sintese = "Cena registrada com elementos de contorno definido; sem alerta critico isolado."
-        relato = (
-            "A inspecao visual identifica objetos ou superficies com contornos nitidos no quadro, "
-            "sem indicio conclusivo de armamento ou ameaca imediata isolada."
-        )
+        sintese = "Cena registrada com elementos visiveis; sem ameaca imediata identificada."
+        relato = "A cena apresenta elementos com contorno nitido, sem indicio conclusivo de armamento ou atitude hostil imediata."
     else:
         nivel = "NORMAL"
         status = "SEM_ANOMALIA_APARENTE"
-        sintese = "Cena sem anomalias visuais evidentes no enquadramento atual."
-        relato = (
-            "A leitura visual da imagem indica cena sem elementos criticos isolados de forma conclusiva "
-            "no momento da captura."
-        )
-
-    if motivo:
-        pontos.append(f"Contingencia: {motivo}")
+        sintese = "Cena sem anomalias evidentes no momento."
+        relato = "Nao ha indicios visuais evidentes de armamento ou situacao critica imediata na imagem atual."
 
     return {
-        "modo_analise": "CONTINGENCIA_PIXELS",
+        "modo_analise": "SENSOR_VISUAL",
         "status": status,
         "nivel": nivel,
         "pessoas_visiveis": 0,
         "objetos": objetos,
         "sintese_operacional": sintese,
         "relato_visual": relato,
-        "pontos_atencao": pontos or ["Monitoramento continuo em curso"],
+        "pontos_atencao": pontos or ["Acompanhamento visual continuo"],
         "detalhes_cena": info["detalhes"],
         "caixa_arma": None,
         "rotulo_arma": ""
@@ -469,10 +447,10 @@ def _chamar_visao_sync(mime: str, img_b64: str):
 
     prompt = (
         "Voce e o modulo de analise visual operacional do GUARDIAO DF-360 para apoio decisorio do comando (ALFA / SSPDF). "
-        "Descreva com precisao extrema e fidelidade absoluta o que esta visivel na imagem (ignore completamente o nome do arquivo).\n"
+        "Escreva em portugues claro, direto e operacional, como um relatorio policial/tatico para tomada de decisao — SEM mencionar pixels, resolucao, brilho, contraste, sensores, IA, modelos ou tecnologia.\n"
         "Detalhe sempre:\n"
         "1) Pessoas visiveis: quantidade, vestimentas/farda (ex.: farda policial/militar, traje civil, roupa escura), postura/posicao (em pe, sentada, deitada no chao, aparentemente ferida ou imobilizada, apontando para cima/frente, mao proxima ao coldre, etc.) e proximidade/relacao com outras pessoas na cena.\n"
-        "2) Armas e objetos: especifique EXATAMENTE qual arma esta na imagem (ex.: fuzil, carabina, espingarda, metralhadora/fuzil-metralhador, pistola, revolver, faca), onde esta (isolada em fundo branco, sobre o corpo/chao, dentro do coldre na cintura, empunhada, apontada para cima/alguem) e outros objetos na mao ou na cena.\n"
+        "2) Armas e objetos: especifique EXATAMENTE qual arma esta na imagem (ex.: fuzil, carabina, espingarda, metralhadora/fuzil-metralhador, pistola, revolver, faca), onde esta (isolada, sobre o corpo/chao, no coldre na cintura, empunhada, apontada para cima/alguem) e outros objetos relevantes.\n"
         "3) Se houver qualquer arma de fogo ou arma branca visivel na cena (mesmo no coldre ou isolada), informe OBRIGATORIAMENTE em 'caixa_arma' as coordenadas normalizadas de 0 a 1000 no formato [ymin, xmin, ymax, xmax] delimitando exatamente a arma.\n"
         "Responda APENAS com um JSON valido (sem markdown, sem texto fora do JSON):\n"
         "{\n"
@@ -483,12 +461,12 @@ def _chamar_visao_sync(mime: str, img_b64: str):
         '  "pessoas_visiveis": int,\n'
         '  "nivel_sugerido": "NORMAL" | "OBSERVACAO" | "ATENCAO_ELEVADA" | "ALTO_RISCO",\n'
         '  "objetos": [{"rotulo": "string", "confianca": 0-100, "detalhe": "string"}],\n'
-        '  "sintese_operacional": "string direta com os fatos criticos, tipo exato da arma/coldre/mira, pessoas (inclusive se deitada ou aparentemente ferida) e atitude para decisao do ALFA",\n'
-        '  "relato_detalhado": "string completa e fiel descrevendo pessoas, vestimenta/farda, postura (em pe, sentada, deitada, aparentemente ferida), arma (tipo exato, coldre, mao, sobre o corpo, direcao da mira), proximidade de terceiros e ambiente",\n'
+        '  "sintese_operacional": "string curta e direta com os fatos criticos, tipo exato da arma/coldre/mira, pessoas (inclusive se deitada ou aparentemente ferida) e acao recomendada ao ALFA",\n'
+        '  "relato_detalhado": "string objetiva e completa descrevendo pessoas, vestimenta/farda, postura, arma (tipo exato, coldre, mao, sobre o corpo, direcao da mira), proximidade de outras pessoas e local aparente",\n'
         '  "pontos_atencao": ["string"],\n'
         '  "caixa_arma": [ymin, xmin, ymax, xmax] ou null\n'
         "}\n"
-        "Seja claro, objetivo e fiel ao que se ve. Nao mencione tecnologia, modelos, APIs ou plataformas."
+        "Seja objetivo e fiel ao que se ve."
     )
 
     payload = {
@@ -573,7 +551,7 @@ def sanitizar_texto_operacional(txt: str) -> str:
         return ""
     limpo = re.sub(
         r"(?i)\b(gemini|google\s*ai\s*studio|generativelanguage|render|gemini_api_key|guardiao_chave_visao|sem_chave_ia_configurada)\b",
-        "sensor visual",
+        "monitoramento",
         txt
     )
     return re.sub(r"\s{2,}", " ", limpo).strip()
@@ -590,6 +568,8 @@ async def analisar_imagem_ia(caminho: Path):
     arma_branca = bool(parsed.get("arma_branca", False))
     atitude_ameaca = bool(parsed.get("atitude_ameaca", False))
     objeto_mao = sanitizar_texto_operacional(str(parsed.get("objeto_na_mao") or "").strip())
+    if objeto_mao.lower() in ("nenhum", "nenhuma", "nao ha", "não há", "vazio", "nada"):
+        objeto_mao = ""
 
     try:
         pessoas = max(0, int(parsed.get("pessoas_visiveis", 0) or 0))
@@ -601,14 +581,16 @@ async def analisar_imagem_ia(caminho: Path):
         objetos.append({
             "rotulo": objeto_mao,
             "confianca": "",
-            "detalhe": "Objeto empunhado/segurado/na cena"
+            "detalhe": "Em posse / na cena"
         })
 
     if isinstance(parsed.get("objetos"), list):
         for item in parsed.get("objetos"):
             if isinstance(item, dict):
-                rotulo = sanitizar_texto_operacional(str(item.get("rotulo") or item.get("classe") or "Elemento"))
+                rotulo = sanitizar_texto_operacional(str(item.get("rotulo") or item.get("classe") or ""))
                 det = sanitizar_texto_operacional(str(item.get("detalhe") or ""))
+                if not rotulo or rotulo.lower() in ("nenhum", "nenhuma", "nada", "vazio"):
+                    continue
                 conf_raw = item.get("confianca")
                 conf_txt = ""
                 try:
@@ -619,7 +601,7 @@ async def analisar_imagem_ia(caminho: Path):
                         conf_txt = f"{round(c_val, 1)}%"
                 except Exception:
                     conf_txt = ""
-                if rotulo and not any(o["rotulo"].lower() == rotulo.lower() for o in objetos):
+                if not any(o["rotulo"].lower() == rotulo.lower() for o in objetos):
                     objetos.append({"rotulo": rotulo, "confianca": conf_txt, "detalhe": det})
 
     relato = sanitizar_texto_operacional(
@@ -631,16 +613,16 @@ async def analisar_imagem_ia(caminho: Path):
 
     pontos = []
     if objeto_mao:
-        pontos.append(f"Objeto na mao/cena: {objeto_mao}")
+        pontos.append(f"Objeto identificado: {objeto_mao}")
     if atitude_ameaca:
-        pontos.append("Atitude de ameaca / postura agressiva ou suspeita")
+        pontos.append("Postura de ameaca ou risco imediato")
     if isinstance(parsed.get("pontos_atencao"), list):
         for p in parsed.get("pontos_atencao"):
             sp = sanitizar_texto_operacional(str(p))
-            if sp and sp not in pontos:
+            if sp and sp.lower() not in ("nenhum", "nenhuma", "nada") and sp not in pontos:
                 pontos.append(sp)
     if not pontos:
-        pontos = list(info.get("obs") or ["Cena avaliada"])
+        pontos = ["Acompanhamento operacional em curso"]
 
     nivel_ia = str(parsed.get("nivel_sugerido") or "").strip().upper()
     if arma_fogo or (atitude_ameaca and (arma_branca or bool(objeto_mao))):
@@ -751,13 +733,13 @@ async def voltar_ocorrencia_anterior():
 async def simular_retorno_bravo_demo(oc_id: str, unidade: str = "BRAVO", endereco: str = ""):
     if not MODO_DEMO_RETORNO_BRAVO:
         return
-    await asyncio.sleep(8)
+    await asyncio.sleep(6)
     hora = agora_br().strftime("%H:%M:%S")
-    loc_txt = f" ({endereco})" if endereco else ""
+    loc_txt = f" em {endereco}" if endereco else ""
     relatos = [
-        f"[DEMO] Unidade {unidade} em deslocamento ate {loc_txt.strip() or 'o ponto informado pelo ALFA'}.",
-        f"[DEMO] Unidade {unidade} no local{loc_txt}; averiguacao em andamento.",
-        f"[DEMO] Unidade {unidade} concluiu averiguacao inicial{loc_txt} e aguarda diretriz do ALFA."
+        f"Unidade {unidade} em deslocamento{loc_txt}.",
+        f"Unidade {unidade} no local{loc_txt}; averiguacao em andamento.",
+        f"Unidade {unidade} concluiu a averiguacao inicial{loc_txt} e aguarda orientacao do ALFA."
     ]
     txt = random.choice(relatos)
     STATE["retorno_bravo"].append({"hora": hora, "ocorrencia_id": oc_id, "texto": txt})
@@ -959,9 +941,10 @@ button{padding:7px 11px;border:none;border-radius:6px;cursor:pointer;font-weight
 select,input{background:#0b101b;color:#fff;border:1px solid #334155;border-radius:6px;padding:6px 8px;font-size:12px;min-width:0;max-width:100%}
 .box{background:#0b101b;border:1px solid #1e293b;border-radius:6px;padding:8px;max-height:260px;overflow-y:auto;overflow-x:hidden;font-size:12px;overflow-wrap:anywhere;word-break:break-word;max-width:100%}
 .item{border-bottom:1px solid #1e293b;padding:5px 0}
-.linha-rel{margin-top:4px;line-height:1.35}
+.linha-rel{margin-top:5px;line-height:1.4}
 .crit{color:#fca5a5}.med{color:#fcd34d}.seg{color:#86efac}
 .envio-ok{margin-top:8px;padding:7px 10px;border-radius:6px;background:#064e3b;border:1px solid #10b981;color:#a7f3d0;font-size:12px;font-weight:700}
+.retorno-destaque{margin-top:8px;padding:10px 12px;border-radius:6px;background:#451a03;border:2px solid #f59e0b;color:#fde68a;font-size:13px;font-weight:700;line-height:1.35;overflow-wrap:anywhere}
 </style>
 </head>
 <body>
@@ -976,6 +959,7 @@ select,input{background:#0b101b;color:#fff;border:1px solid #334155;border-radiu
     <div id="meta" style="font-size:11px;color:#94a3b8;margin-top:6px;overflow-wrap:anywhere"></div>
     <div id="enderecoBox" class="endereco-bar" style="display:none"></div>
     <div id="statusEnvio" class="envio-ok" style="display:none"></div>
+    <div id="retornoDestaque" class="retorno-destaque" style="display:none"></div>
     <div class="botoes">
       <select id="selUnidade">
         <option value="BRAVO-01">BRAVO-01</option>
@@ -1053,10 +1037,11 @@ async function atualizar(){
   const a = d.atual;
   const badgeEnv = document.getElementById("statusEnvio");
   const endBox = document.getElementById("enderecoBox");
+  const retBox = document.getElementById("retornoDestaque");
   if(a){
     window._atualId = a.id;
     document.getElementById("foto").src = "/imagem?t=" + encodeURIComponent(a.id + "_" + a.situacao_fluxo + "_" + (a.modo_analise || ""));
-    document.getElementById("meta").textContent = "ID: "+a.id+" | "+a.arquivo+" ("+a.indice+"/"+a.total+") | "+a.situacao_fluxo+" | "+(a.modo_analise||"");
+    document.getElementById("meta").textContent = "ID: "+a.id+" | "+a.arquivo+" ("+a.indice+"/"+a.total+") | "+a.situacao_fluxo;
     if(a.endereco){
       endBox.style.display = "block";
       endBox.innerHTML = "<b>ENDERECO DA OCORRENCIA:</b> " + esc(a.endereco);
@@ -1071,26 +1056,33 @@ async function atualizar(){
       badgeEnv.style.display = "none";
       badgeEnv.textContent = "";
     }
+    if(a.retorno_bravo){
+      retBox.style.display = "block";
+      retBox.innerHTML = "RETORNO DO BRAVO: " + esc(a.retorno_bravo);
+    } else {
+      retBox.style.display = "none";
+      retBox.innerHTML = "";
+    }
     const objs = (a.objetos||[]).map(x => {
       const rot = esc(x.rotulo || "");
-      const det = x.detalhe ? " [" + esc(x.detalhe) + "]" : "";
-      const conf = x.confianca ? " (" + esc(x.confianca) + ")" : "";
-      return (rot + det + conf).trim();
-    }).filter(Boolean).join("; ") || "Nenhum objeto critico isolado";
+      const det = x.detalhe ? " (" + esc(x.detalhe) + ")" : "";
+      return (rot + det).trim();
+    }).filter(Boolean).join("; ") || "Nenhum objeto relevante identificado";
     const pontos = (a.pontos_atencao||[]).map(p => esc(p)).join(" | ") || "Sem pontos adicionais";
     const cls = (a.nivel==="ALTO_RISCO"||a.nivel==="ATENCAO_ELEVADA")?"crit":(a.nivel==="OBSERVACAO"||a.nivel==="REGISTRO_OBJETO"?"med":"seg");
     document.getElementById("relatorio").innerHTML =
-      "<div class='"+cls+"'><b>NIVEL:</b> "+esc(a.nivel)+" | <b>STATUS:</b> "+esc(a.status)+" | <b>PESSOAS:</b> "+esc(a.pessoas_visiveis ?? 0)+" | <b>MODO:</b> "+esc(a.modo_analise || "SENSOR_VISUAL")+"</div>"+
-      (a.endereco ? "<div class='linha-rel'><b>ENDERECO DA OCORRENCIA:</b> "+esc(a.endereco)+"</div>" : "")+
+      "<div class='"+cls+"'><b>NIVEL:</b> "+esc(a.nivel)+" | <b>STATUS:</b> "+esc(a.status)+" | <b>PESSOAS:</b> "+esc(a.pessoas_visiveis ?? 0)+"</div>"+
+      (a.endereco ? "<div class='linha-rel'><b>ENDERECO:</b> "+esc(a.endereco)+"</div>" : "")+
       "<div class='linha-rel'><b>SINTESE OPERACIONAL (ALFA):</b> "+esc(a.sintese_operacional || a.relato_visual)+"</div>"+
-      "<div class='linha-rel'><b>ELEMENTOS / OBJETOS VISIVEIS:</b> "+objs+"</div>"+
-      "<div class='linha-rel'><b>RELATO COMPLETO DA CENA:</b> "+esc(a.relato_visual)+"</div>"+
+      "<div class='linha-rel'><b>ELEMENTOS NA CENA:</b> "+objs+"</div>"+
+      "<div class='linha-rel'><b>RELATO DA OCORRENCIA:</b> "+esc(a.relato_visual)+"</div>"+
       "<div class='linha-rel'><b>PONTOS DE ATENCAO:</b> "+pontos+"</div>"+
-      "<div class='linha-rel'><b>AMBIENTE / TELEMETRIA:</b> "+esc(a.detalhes_cena)+"</div>"+
-      (a.retorno_bravo ? "<div class='linha-rel'><b>RETORNO BRAVO:</b> "+esc(a.retorno_bravo)+"</div>" : "");
+      "<div class='linha-rel'><b>CONDICAO DO LOCAL:</b> "+esc(a.detalhes_cena)+"</div>"+
+      (a.retorno_bravo ? "<div class='linha-rel "+cls+"'><b>RETORNO BRAVO:</b> "+esc(a.retorno_bravo)+"</div>" : "");
   } else {
     endBox.style.display = "none";
     badgeEnv.style.display = "none";
+    retBox.style.display = "none";
     document.getElementById("meta").textContent = "Aguardando proxima ocorrencia...";
     document.getElementById("relatorio").innerHTML = "Nenhuma ocorrencia ativa no momento.";
   }
