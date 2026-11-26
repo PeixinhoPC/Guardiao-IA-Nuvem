@@ -166,6 +166,16 @@ STATE = {
     ]
 }
 
+_TAREFAS_ACOMP = {}
+
+
+def _atualizar_ocorrencia_por_id(oc_id: str, fn):
+    for o in STATE["historico"]:
+        if o["id"] == oc_id:
+            fn(o)
+    if STATE["atual"] and STATE["atual"]["id"] == oc_id:
+        fn(STATE["atual"])
+
 
 def inspecionar_imagem(caminho: Path):
     img_w, img_h = 1, 1
@@ -679,6 +689,8 @@ def _registrar_ocorrencia(arq: Path, indice_zero: int, total: int, analise: dict
         "caminho": str(arq),
         "situacao_fluxo": "ATIVA",
         "acompanhando": False,
+        "solucao_pronta": False,
+        "aviso_solucao": "",
         "unidade_bravo": "",
         "retorno_bravo": "",
         **analise
@@ -738,6 +750,54 @@ async def voltar_ocorrencia_anterior():
     return _registrar_ocorrencia(arq, STATE["indice"], len(imagens), analise)
 
 
+async def _monitorar_solucao_ate_aviso(oc_id: str, unidade: str, endereco: str):
+    loc_txt = f" em {endereco}" if endereco else ""
+    try:
+        await asyncio.sleep(5)
+        hora_etapa = agora_br().strftime("%H:%M:%S")
+        txt_etapa = f"Unidade {unidade} em deslocamento{loc_txt}."
+        STATE["retorno_bravo"].append({"hora": hora_etapa, "ocorrencia_id": oc_id, "texto": txt_etapa})
+        STATE["retorno_bravo"] = STATE["retorno_bravo"][-30:]
+        _atualizar_ocorrencia_por_id(oc_id, lambda o: o.update({
+            "retorno_bravo": f"[{hora_etapa}] {txt_etapa}",
+            "solucao_pronta": False,
+            "aviso_solucao": ""
+        }))
+
+        await asyncio.sleep(6)
+        hora_sol = agora_br().strftime("%H:%M:%S")
+        desfechos = [
+            f"Unidade {unidade} concluiu a ocorrencia{loc_txt}; situacao controlada e solucionada.",
+            f"Unidade {unidade} encerrou o atendimento{loc_txt} com local estabilizado e sem risco pendente."
+        ]
+        txt_sol = random.choice(desfechos)
+        aviso_alfa = f"SOLUCAO INFORMADA POR {unidade} as {hora_sol}: Ocorrencia pronta para arquivamento pelo ALFA."
+        STATE["retorno_bravo"].append({"hora": hora_sol, "ocorrencia_id": oc_id, "texto": txt_sol})
+        STATE["retorno_bravo"] = STATE["retorno_bravo"][-30:]
+        _atualizar_ocorrencia_por_id(oc_id, lambda o: o.update({
+            "retorno_bravo": f"[{hora_sol}] {txt_sol}",
+            "solucao_pronta": True,
+            "aviso_solucao": aviso_alfa
+        }))
+        STATE["mensagens"].append({"origem": unidade, "hora": hora_sol, "texto": aviso_alfa})
+        STATE["mensagens"] = STATE["mensagens"][-150:]
+    except asyncio.CancelledError:
+        pass
+
+
+def _iniciar_monitoramento_solucao(oc_id: str, unidade: str, endereco: str):
+    tarefa_ant = _TAREFAS_ACOMP.get(oc_id)
+    if tarefa_ant and not tarefa_ant.done():
+        tarefa_ant.cancel()
+    _TAREFAS_ACOMP[oc_id] = asyncio.create_task(_monitorar_solucao_ate_aviso(oc_id, unidade, endereco))
+
+
+def _cancelar_monitoramento_solucao(oc_id: str):
+    tarefa = _TAREFAS_ACOMP.pop(oc_id, None)
+    if tarefa and not tarefa.done():
+        tarefa.cancel()
+
+
 async def simular_retorno_bravo_demo(oc_id: str, unidade: str = "BRAVO", endereco: str = ""):
     if not MODO_DEMO_RETORNO_BRAVO:
         return
@@ -752,11 +812,7 @@ async def simular_retorno_bravo_demo(oc_id: str, unidade: str = "BRAVO", enderec
     txt = random.choice(relatos)
     STATE["retorno_bravo"].append({"hora": hora, "ocorrencia_id": oc_id, "texto": txt})
     STATE["retorno_bravo"] = STATE["retorno_bravo"][-30:]
-    for o in STATE["historico"]:
-        if o["id"] == oc_id:
-            o["retorno_bravo"] = f"[{hora}] {txt}"
-    if STATE["atual"] and STATE["atual"]["id"] == oc_id:
-        STATE["atual"]["retorno_bravo"] = f"[{hora}] {txt}"
+    _atualizar_ocorrencia_por_id(oc_id, lambda o: o.update({"retorno_bravo": f"[{hora}] {txt}"}))
 
 
 async def loop_autonomo():
@@ -825,13 +881,12 @@ async def enviar_bravo(req: Request):
     hora = agora_br().strftime("%H:%M:%S")
     endereco = (STATE["atual"].get("endereco") if STATE["atual"] else "") or obter_endereco_ocorrencia(0, oc_id)
     envio_txt = f"ENVIADO PARA {unidade} as {hora} — Local: {endereco}"
-    for o in STATE["historico"]:
-        if o["id"] == oc_id:
-            o["situacao_fluxo"] = f"ENVIADO ({unidade})"
-            o["unidade_bravo"] = envio_txt
-    if STATE["atual"] and STATE["atual"]["id"] == oc_id:
-        STATE["atual"]["situacao_fluxo"] = f"ENVIADO ({unidade})"
-        STATE["atual"]["unidade_bravo"] = envio_txt
+    _atualizar_ocorrencia_por_id(oc_id, lambda o: o.update({
+        "situacao_fluxo": f"ENVIADO ({unidade})",
+        "unidade_bravo": envio_txt,
+        "solucao_pronta": False,
+        "aviso_solucao": ""
+    }))
     STATE["mensagens"].append({"origem": f"ALFA -> {unidade}", "hora": hora, "texto": f"Ocorrencia {oc_id} enviada para {unidade} ({endereco})."})
     STATE["mensagens"] = STATE["mensagens"][-150:]
     if MODO_DEMO_RETORNO_BRAVO:
@@ -843,22 +898,36 @@ async def enviar_bravo(req: Request):
 async def acompanhar_ocorrencia(req: Request):
     dados = await req.json()
     oc_id = dados.get("id") or (STATE["atual"]["id"] if STATE["atual"] else "")
+    unidade = (dados.get("unidade") or (STATE["atual"].get("unidade_bravo") if STATE["atual"] else "") or "BRAVO-01").strip()
+    if "PARA " in unidade and " as " in unidade:
+        unidade = unidade.split("PARA ", 1)[1].split(" as ", 1)[0].strip()
+    endereco = (STATE["atual"].get("endereco") if STATE["atual"] else "") or obter_endereco_ocorrencia(0, oc_id)
     hora = agora_br().strftime("%H:%M:%S")
     acompanhando = True
     for o in STATE["historico"]:
         if o["id"] == oc_id:
             acompanhando = not bool(o.get("acompanhando"))
-            o["acompanhando"] = acompanhando
-            if acompanhando:
-                o["situacao_fluxo"] = "EM ACOMPANHAMENTO"
-    if STATE["atual"] and STATE["atual"]["id"] == oc_id:
-        STATE["atual"]["acompanhando"] = acompanhando
-        if acompanhando:
-            STATE["atual"]["situacao_fluxo"] = "EM ACOMPANHAMENTO"
-            STATE["pausado"] = True
-        else:
-            STATE["pausado"] = False
-            STATE["ultima_troca"] = time.time()
+            break
+    if acompanhando:
+        _atualizar_ocorrencia_por_id(oc_id, lambda o: o.update({
+            "acompanhando": True,
+            "situacao_fluxo": "EM ACOMPANHAMENTO",
+            "solucao_pronta": False,
+            "aviso_solucao": ""
+        }))
+        STATE["pausado"] = True
+        if MODO_DEMO_RETORNO_BRAVO:
+            _iniciar_monitoramento_solucao(oc_id, unidade, endereco)
+    else:
+        _cancelar_monitoramento_solucao(oc_id)
+        _atualizar_ocorrencia_por_id(oc_id, lambda o: o.update({
+            "acompanhando": False,
+            "situacao_fluxo": "ATIVA",
+            "solucao_pronta": False,
+            "aviso_solucao": ""
+        }))
+        STATE["pausado"] = False
+        STATE["ultima_troca"] = time.time()
     STATE["mensagens"].append({
         "origem": "ALFA",
         "hora": hora,
@@ -879,15 +948,17 @@ async def retorno_bravo(req: Request):
     dados = await req.json()
     texto = (dados.get("texto") or "").strip()
     oc_id = (dados.get("oc_id") or (STATE["atual"]["id"] if STATE["atual"] else "GERAL")).strip()
+    solucao = bool(dados.get("solucao", False)) or bool(re.search(r"(?i)\b(solucionad|concluid|encerrad|resolvida|finalizad)\b", texto))
     if texto:
         hora = agora_br().strftime("%H:%M:%S")
         STATE["retorno_bravo"].append({"hora": hora, "ocorrencia_id": oc_id, "texto": texto})
         STATE["retorno_bravo"] = STATE["retorno_bravo"][-30:]
-        for o in STATE["historico"]:
-            if o["id"] == oc_id:
-                o["retorno_bravo"] = f"[{hora}] {texto}"
-        if STATE["atual"] and STATE["atual"]["id"] == oc_id:
-            STATE["atual"]["retorno_bravo"] = f"[{hora}] {texto}"
+        aviso = f"SOLUCAO INFORMADA as {hora}: {texto} — Pronta para arquivamento pelo ALFA." if solucao else ""
+        _atualizar_ocorrencia_por_id(oc_id, lambda o: o.update({
+            "retorno_bravo": f"[{hora}] {texto}",
+            "solucao_pronta": solucao or bool(o.get("solucao_pronta")),
+            "aviso_solucao": aviso or o.get("aviso_solucao", "")
+        }))
     return {"ok": True}
 
 
@@ -895,6 +966,7 @@ async def retorno_bravo(req: Request):
 async def arquivar(req: Request):
     dados = await req.json()
     oc_id = dados.get("id") or (STATE["atual"]["id"] if STATE["atual"] else "")
+    _cancelar_monitoramento_solucao(oc_id)
     for o in STATE["historico"]:
         if o["id"] == oc_id:
             o["situacao_fluxo"] = "ARQUIVADA"
@@ -973,6 +1045,7 @@ header>div{min-width:0;max-width:100%;overflow-wrap:anywhere}
 img.foto{max-width:100%;width:auto;max-height:310px;border-radius:6px;display:block;margin:0;background:#000}
 .endereco-bar{margin-top:8px;padding:7px 10px;border-radius:6px;background:#0f172a;border:1px solid #1e3a8a;color:#bae6fd;font-size:12px;overflow-wrap:anywhere}
 .acomp-bar{margin-top:8px;padding:8px 10px;border-radius:6px;background:#064e3b;border:1px solid #34d399;color:#d1fae5;font-size:12px;font-weight:700;overflow-wrap:anywhere}
+.solucao-bar{margin-top:8px;padding:10px 12px;border-radius:6px;background:#1e3a8a;border:2px solid #60a5fa;color:#eff6ff;font-size:13px;font-weight:700;line-height:1.35;overflow-wrap:anywhere}
 .botoes{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center;max-width:100%}
 button{padding:7px 11px;border:none;border-radius:6px;cursor:pointer;font-weight:600;color:#fff;font-size:12px;max-width:100%}
 .b-bravo{background:#dc2626}.b-arq{background:#2563eb}.b-desarq{background:#059669}.b-prev{background:#334155}.b-acomp{background:#d97706}.b-acomp-ativo{background:#047857}
@@ -998,6 +1071,7 @@ select,input{background:#0b101b;color:#fff;border:1px solid #334155;border-radiu
     <div id="acompBox" class="acomp-bar" style="display:none"></div>
     <div id="statusEnvio" class="envio-ok" style="display:none"></div>
     <div id="retornoDestaque" class="retorno-destaque" style="display:none"></div>
+    <div id="solucaoBox" class="solucao-bar" style="display:none"></div>
     <div class="botoes">
       <select id="selUnidade">
         <option value="BRAVO-01">BRAVO-01</option>
@@ -1039,7 +1113,8 @@ async function enviarBravo(){
 }
 async function acompanharOcorrencia(){
   const id = window._atualId || "";
-  await fetch("/api/acompanhar",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})});
+  const unidade = document.getElementById("selUnidade").value;
+  await fetch("/api/acompanhar",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,unidade})});
   atualizar();
 }
 async function arquivarAtual(){
@@ -1074,6 +1149,7 @@ async function atualizar(){
   const endBox = document.getElementById("enderecoBox");
   const acompBox = document.getElementById("acompBox");
   const retBox = document.getElementById("retornoDestaque");
+  const solBox = document.getElementById("solucaoBox");
   const btnAcomp = document.getElementById("btnAcompanhar");
   if(a){
     window._atualId = a.id;
@@ -1082,7 +1158,9 @@ async function atualizar(){
     btnAcomp.className = acompAtivo ? "b-acomp-ativo" : "b-acomp";
     if(acompAtivo){
       acompBox.style.display = "block";
-      acompBox.textContent = "ACOMPANHAMENTO ATIVO: Ocorrencia travada ate a solucao e arquivamento pelo ALFA.";
+      acompBox.textContent = a.solucao_pronta
+        ? "ACOMPANHAMENTO CONCLUIDO: Retorno de solucao recebido; clique em ARQUIVAR OCORRENCIA."
+        : "ACOMPANHAMENTO ATIVO: Monitorando ocorrencia ate o retorno de solucao para o ALFA.";
     } else {
       acompBox.style.display = "none";
       acompBox.textContent = "";
@@ -1110,6 +1188,13 @@ async function atualizar(){
       retBox.style.display = "none";
       retBox.innerHTML = "";
     }
+    if(a.solucao_pronta && a.aviso_solucao){
+      solBox.style.display = "block";
+      solBox.textContent = "AVISO AO ALFA: " + a.aviso_solucao;
+    } else {
+      solBox.style.display = "none";
+      solBox.textContent = "";
+    }
     const objs = (a.objetos||[]).map(x => {
       const rot = esc(x.rotulo || "");
       const det = x.detalhe ? " (" + esc(x.detalhe) + ")" : "";
@@ -1132,6 +1217,7 @@ async function atualizar(){
     endBox.style.display = "none";
     badgeEnv.style.display = "none";
     retBox.style.display = "none";
+    solBox.style.display = "none";
     document.getElementById("meta").textContent = "Aguardando proxima ocorrencia...";
     document.getElementById("relatorio").innerHTML = "Nenhuma ocorrencia ativa no momento.";
   }
