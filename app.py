@@ -262,6 +262,23 @@ def desenhar_retangulo_arma(caminho: Path, caixa, rotulo: str = "ARMA") -> bytes
         return buf.getvalue()
 
 
+def _prioridade_modelo(nome: str) -> int:
+    n = (nome or "").lower()
+    if n == "gemini-flash-lite-latest":
+        return 0
+    if "flash-lite" in n and "preview" not in n:
+        return 1
+    if "flash-lite" in n:
+        return 2
+    if n == "gemini-flash-latest":
+        return 3
+    if "flash" in n and "lite" not in n and "preview" not in n:
+        return 4
+    if "flash" in n:
+        return 5
+    return 6
+
+
 def obter_modelos_disponiveis(chave: str):
     agora = time.time()
     if (
@@ -293,28 +310,14 @@ def obter_modelos_disponiveis(chave: str):
             except Exception as exc:
                 print(f"[GUARDIAO] Erro ao listar modelos ({ver}): {type(exc).__name__} — {exc}", flush=True)
 
+    descobertos.sort(key=lambda item: _prioridade_modelo(item[0]))
+
     modelo_env = obter_modelo_env()
     prioritarios = []
 
-    if modelo_env:
+    if modelo_env and modelo_env != "gemini-2.5-flash":
         for ver in ("v1beta", "v1"):
             par = (modelo_env, ver)
-            if par not in prioritarios and par not in _MODELOS_INEXISTENTES_404:
-                prioritarios.append(par)
-
-    for m_pref in (
-        "gemini-2.5-flash",
-        "gemini-2.0-flash",
-        "gemini-flash-latest",
-        "gemini-2.5-flash-lite",
-        "gemini-2.0-flash-lite",
-        "gemini-flash-lite-latest",
-        "gemini-3.1-flash-lite",
-        "gemini-3.1-flash-lite-preview",
-        "gemini-3.5-flash-lite"
-    ):
-        for ver in ("v1beta", "v1"):
-            par = (m_pref, ver)
             if par not in prioritarios and par not in _MODELOS_INEXISTENTES_404:
                 prioritarios.append(par)
 
@@ -322,7 +325,23 @@ def obter_modelos_disponiveis(chave: str):
         if par not in prioritarios and par not in _MODELOS_INEXISTENTES_404:
             prioritarios.append(par)
 
-    fila_final = prioritarios[:10]
+    for m_pref in (
+        "gemini-flash-lite-latest",
+        "gemini-3.1-flash-lite",
+        "gemini-3.1-flash-lite-preview",
+        "gemini-3.5-flash-lite",
+        "gemini-2.5-flash-lite",
+        "gemini-2.0-flash-lite",
+        "gemini-flash-latest",
+        "gemini-2.5-flash",
+        "gemini-2.0-flash"
+    ):
+        for ver in ("v1beta", "v1"):
+            par = (m_pref, ver)
+            if par not in prioritarios and par not in _MODELOS_INEXISTENTES_404:
+                prioritarios.append(par)
+
+    fila_final = prioritarios[:12]
     print(f"[GUARDIAO] Fila de modelos estaveis ativa: {fila_final}", flush=True)
     _MODELOS_CACHE["lista"] = fila_final
     _MODELOS_CACHE["expira"] = agora + 1800.0
@@ -480,7 +499,7 @@ def _chamar_visao_sync(mime: str, img_b64: str):
             if resp.status_code in (429, 500, 502, 503, 504):
                 ultimo_erro = f"Instabilidade temporaria (HTTP {resp.status_code}) em {modelo}"
                 print(f"[GUARDIAO] {ultimo_erro} ({ver}) — pulando para proximo modelo", flush=True)
-                time.sleep(0.6)
+                time.sleep(0.5)
                 continue
             resp.raise_for_status()
             data = resp.json()
