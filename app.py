@@ -21,7 +21,7 @@ MONITOR_DIR = BASE_DIR / "IMAGENS_MONITOR"
 INTERVALO_SEG = 120
 MODO_DEMO_RETORNO_BRAVO = True
 
-app = FastAPI(title="GUARDIAO DF-360 — SSPDF")
+app = FastAPI(title="MONITORAMENTO OPERACIONAL")
 
 _MODELOS_CACHE = {
     "lista": [],
@@ -144,6 +144,20 @@ def listar_imagens():
     return filtradas or encontradas
 
 
+def _resumo_proxima_ocorrencia():
+    imagens = listar_imagens()
+    if not imagens:
+        return None
+    prox_idx = (STATE["indice"] + 1) % len(imagens)
+    arq = imagens[prox_idx]
+    return {
+        "indice": prox_idx + 1,
+        "total": len(imagens),
+        "arquivo": arq.name,
+        "endereco": obter_endereco_ocorrencia(prox_idx, arq.name)
+    }
+
+
 STATE = {
     "indice": -1,
     "atual": None,
@@ -152,9 +166,9 @@ STATE = {
     "historico": [],
     "mensagens": [
         {
-            "origem": "GUARDIAO",
+            "origem": "CENTRAL",
             "hora": agora_br().strftime("%H:%M:%S"),
-            "texto": "GUARDIAO DF-360 operacional. Monitoramento visual autonomo ativo."
+            "texto": "Monitoramento visual autonomo ativo."
         }
     ],
     "retorno_bravo": [
@@ -446,7 +460,7 @@ def _chamar_visao_sync(mime: str, img_b64: str):
         return None, "Imagem sem dados visuais"
 
     prompt = (
-        "Voce e o modulo de analise visual operacional do GUARDIAO DF-360 para apoio decisorio do comando (ALFA / SSPDF). "
+        "Voce e o modulo de analise visual operacional para apoio decisorio do comando (ALFA). "
         "Escreva em portugues claro, direto e operacional, como um relatorio policial/tatico para tomada de decisao — SEM mencionar pixels, resolucao, brilho, contraste, sensores, IA, modelos ou tecnologia.\n"
         "Detalhe sempre:\n"
         "1) Pessoas visiveis: quantidade, vestimentas/farda (ex.: farda policial/militar, traje civil, roupa escura), postura/posicao (em pe, sentada, deitada no chao, aparentemente ferida ou imobilizada, apontando para cima/frente, mao proxima ao coldre, etc.) e proximidade/relacao com outras pessoas na cena.\n"
@@ -550,7 +564,7 @@ def sanitizar_texto_operacional(txt: str) -> str:
     if not txt:
         return ""
     limpo = re.sub(
-        r"(?i)\b(gemini|google\s*ai\s*studio|generativelanguage|render|gemini_api_key|guardiao_chave_visao|sem_chave_ia_configurada)\b",
+        r"(?i)\b(guardiao\s*df-?360|guardiao|sspdf|gemini|google\s*ai\s*studio|generativelanguage|render|gemini_api_key|guardiao_chave_visao|sem_chave_ia_configurada)\b",
         "monitoramento",
         txt
     )
@@ -680,7 +694,7 @@ def _registrar_ocorrencia(arq: Path, indice_zero: int, total: int, analise: dict
     STATE["historico"].append(oc)
     STATE["historico"] = STATE["historico"][-300:]
     STATE["mensagens"].append({
-        "origem": "GUARDIAO",
+        "origem": "CENTRAL",
         "hora": agora.strftime("%H:%M:%S"),
         "texto": f"[{oc['id']}] {oc['nivel']} — {endereco} — {oc['sintese_operacional']}"
     })
@@ -805,6 +819,7 @@ async def api_estado():
         "pausado": STATE["pausado"],
         "modo_demo_retorno": MODO_DEMO_RETORNO_BRAVO,
         "atual": STATE["atual"],
+        "proxima": _resumo_proxima_ocorrencia(),
         "arquivadas": arquivadas[-40:],
         "mensagens": STATE["mensagens"][-40:],
         "retorno_bravo": STATE["retorno_bravo"][-30:]
@@ -903,7 +918,7 @@ async def mensagem(req: Request):
     if texto:
         hora = agora_br().strftime("%H:%M:%S")
         STATE["mensagens"].append({"origem": "ALFA", "hora": hora, "texto": texto})
-        STATE["mensagens"].append({"origem": "GUARDIAO", "hora": hora, "texto": f"Registrado pelo GUARDIAO: '{texto}'."})
+        STATE["mensagens"].append({"origem": "CENTRAL", "hora": hora, "texto": f"Registrado: '{texto}'."})
         STATE["mensagens"] = STATE["mensagens"][-150:]
     return {"ok": True}
 
@@ -923,7 +938,7 @@ async def home():
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GUARDIAO DF-360</title>
+<title>PAINEL OPERACIONAL</title>
 <style>
 *,*::before,*::after{box-sizing:border-box}
 html,body{margin:0;padding:0;width:100%;max-width:100%;overflow-x:clip;background:#090d16;color:#e6eef8;font-family:Segoe UI,sans-serif}
@@ -933,7 +948,12 @@ header>div{min-width:0;max-width:100%;overflow-wrap:anywhere}
 .wrap{max-width:980px;margin:0 auto;padding:12px;width:100%}
 .card{background:#111827;border:1px solid #243247;border-radius:8px;padding:12px;margin-bottom:12px;min-width:0;max-width:100%;overflow:hidden}
 .card h3{margin:0 0 8px 0;color:#93c5fd;font-size:13px;overflow-wrap:anywhere}
-img.foto{max-width:100%;width:auto;max-height:310px;border-radius:6px;display:block;margin:0 auto;background:#000}
+.visao-grid{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:12px;align-items:start}
+@media(max-width:760px){.visao-grid{grid-template-columns:1fr}}
+img.foto{max-width:100%;width:100%;max-height:310px;object-fit:contain;border-radius:6px;display:block;margin:0;background:#000}
+.prox-box{background:#0b101b;border:1px solid #1e3a8a;border-radius:6px;padding:10px;min-width:0;overflow-wrap:anywhere}
+.prox-titulo{font-size:12px;font-weight:700;color:#93c5fd;margin-bottom:6px}
+.prox-linha{font-size:12px;margin-top:5px;line-height:1.35;color:#e2e8f0}
 .endereco-bar{margin-top:8px;padding:7px 10px;border-radius:6px;background:#0f172a;border:1px solid #1e3a8a;color:#bae6fd;font-size:12px;overflow-wrap:anywhere}
 .botoes{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center;max-width:100%}
 button{padding:7px 11px;border:none;border-radius:6px;cursor:pointer;font-weight:600;color:#fff;font-size:12px;max-width:100%}
@@ -949,14 +969,22 @@ select,input{background:#0b101b;color:#fff;border:1px solid #334155;border-radiu
 </head>
 <body>
 <header>
-  <div><b>GUARDIAO DF-360 — SSPDF / DF-360</b> | Ciclo: <span id="ciclo">02:00</span></div>
+  <div><b>PAINEL OPERACIONAL</b> | Ciclo: <span id="ciclo">02:00</span></div>
   <div class="relogio" id="relogio">--/--/---- --:--:--</div>
 </header>
 <div class="wrap">
   <div class="card">
-    <h3>CAMPO DE VISAO DO GUARDIAO</h3>
-    <img id="foto" class="foto" src="/imagem" alt="Imagem analisada">
-    <div id="meta" style="font-size:11px;color:#94a3b8;margin-top:6px;overflow-wrap:anywhere"></div>
+    <h3>CAMPO DE VISAO</h3>
+    <div class="visao-grid">
+      <div>
+        <img id="foto" class="foto" src="/imagem" alt="Imagem analisada">
+        <div id="meta" style="font-size:11px;color:#94a3b8;margin-top:6px;overflow-wrap:anywhere"></div>
+      </div>
+      <div class="prox-box">
+        <div class="prox-titulo">PROXIMA OCORRENCIA</div>
+        <div id="proxConteudo" class="prox-linha">Aguardando proxima ocorrencia...</div>
+      </div>
+    </div>
     <div id="enderecoBox" class="endereco-bar" style="display:none"></div>
     <div id="statusEnvio" class="envio-ok" style="display:none"></div>
     <div id="retornoDestaque" class="retorno-destaque" style="display:none"></div>
@@ -975,7 +1003,7 @@ select,input{background:#0b101b;color:#fff;border:1px solid #334155;border-radiu
     </div>
   </div>
   <div class="card">
-    <h3>RELATORIO SITUACIONAL DO GUARDIAO (DECISAO ALFA)</h3>
+    <h3>RELATORIO SITUACIONAL (DECISAO ALFA)</h3>
     <div id="relatorio" class="box"></div>
   </div>
   <div class="card">
@@ -1034,6 +1062,17 @@ async function atualizar(){
   const d = await r.json();
   document.getElementById("relogio").textContent = d.agora;
   document.getElementById("ciclo").textContent = fmtSeg(d.restante) + (d.pausado ? " [PAUSADO]" : "");
+  const prox = d.proxima;
+  const proxEl = document.getElementById("proxConteudo");
+  if(prox){
+    proxEl.innerHTML =
+      "<div><b>SEQUENCIA:</b> " + esc(prox.indice) + "/" + esc(prox.total) + "</div>" +
+      "<div class='prox-linha'><b>ENDERECO PREVISTO:</b> " + esc(prox.endereco) + "</div>" +
+      "<div class='prox-linha'><b>REGISTRO:</b> " + esc(prox.arquivo) + "</div>" +
+      "<div class='prox-linha'><b>TROCA EM:</b> " + fmtSeg(d.restante) + "</div>";
+  } else {
+    proxEl.textContent = "Aguardando proxima ocorrencia...";
+  }
   const a = d.atual;
   const badgeEnv = document.getElementById("statusEnvio");
   const endBox = document.getElementById("enderecoBox");
