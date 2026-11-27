@@ -4,6 +4,7 @@ import json
 import os
 import random
 import re
+import sqlite3
 import time
 import uuid
 from datetime import datetime
@@ -18,6 +19,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageStat
 TZ_BR = ZoneInfo("America/Sao_Paulo")
 BASE_DIR = Path(__file__).resolve().parent
 MONITOR_DIR = BASE_DIR / "IMAGENS_MONITOR"
+DB_PATH = BASE_DIR / "guardiao_dados.db"
 INTERVALO_SEG = 120
 MODO_DEMO_RETORNO_BRAVO = True
 
@@ -69,6 +71,94 @@ ENDERECOS_DF_OPERACIONAIS = (
     "EPCT (DF-001) — KM 12, Sobradinho/DF",
     "Setor Central — Quadra 03, Gama/DF"
 )
+
+
+def iniciar_db():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ocorrencias (
+                id TEXT PRIMARY KEY,
+                iso_dt TEXT,
+                dados_json TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS mensagens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                origem TEXT,
+                hora TEXT,
+                texto TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS retorno_bravo (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                hora TEXT,
+                ocorrencia_id TEXT,
+                texto TEXT
+            )
+        """)
+        conn.commit()
+
+
+def salvar_ocorrencia_db(oc: dict):
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO ocorrencias (id, iso_dt, dados_json) VALUES (?, ?, ?)",
+                (oc["id"], oc.get("iso_dt", ""), json.dumps(oc, ensure_ascii=False))
+            )
+            conn.commit()
+    except Exception as exc:
+        print(f"[GUARDIAO] Erro ao salvar ocorrencia no SQLite: {exc}", flush=True)
+
+
+def salvar_mensagem_db(origem: str, hora: str, texto: str):
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                "INSERT INTO mensagens (origem, hora, texto) VALUES (?, ?, ?)",
+                (origem, hora, texto)
+            )
+            conn.commit()
+    except Exception as exc:
+        print(f"[GUARDIAO] Erro ao salvar mensagem no SQLite: {exc}", flush=True)
+
+
+def salvar_retorno_db(hora: str, ocorrencia_id: str, texto: str):
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                "INSERT INTO retorno_bravo (hora, ocorrencia_id, texto) VALUES (?, ?, ?)",
+                (hora, ocorrencia_id, texto)
+            )
+            conn.commit()
+    except Exception as exc:
+        print(f"[GUARDIAO] Erro ao salvar retorno no SQLite: {exc}", flush=True)
+
+
+def carregar_estado_db():
+    iniciar_db()
+    historico = []
+    mensagens = []
+    retornos = []
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            rows_oc = conn.execute("SELECT dados_json FROM ocorrencias ORDER BY iso_dt ASC").fetchall()
+            for (dj,) in rows_oc:
+                try:
+                    historico.append(json.loads(dj))
+                except Exception:
+                    pass
+            rows_msg = conn.execute("SELECT origem, hora, texto FROM mensagens ORDER BY id DESC LIMIT 150").fetchall()
+            for orig, hr, txt in reversed(rows_msg):
+                mensagens.append({"origem": orig, "hora": hr, "texto": txt})
+            rows_ret = conn.execute("SELECT hora, ocorrencia_id, texto FROM retorno_bravo ORDER BY id DESC LIMIT 30").fetchall()
+            for hr, oid, txt in reversed(rows_ret):
+                retornos.append({"hora": hr, "ocorrencia_id": oid, "texto": txt})
+    except Exception as exc:
+        print(f"[GUARDIAO] Erro ao carregar SQLite: {exc}", flush=True)
+    return historico, mensagens, retornos
 
 
 def obter_chave_api() -> str:
@@ -144,20 +234,23 @@ def listar_imagens():
     return filtradas or encontradas
 
 
+_HIST_INICIAL, _MSGS_INICIAL, _RET_INICIAL = carregar_estado_db()
+_ATIVAS_INICIAIS = [o for o in _HIST_INICIAL if o.get("situacao_fluxo") != "ARQUIVADA"]
+
 STATE = {
     "indice": -1,
-    "atual": None,
-    "pausado": False,
-    "ultima_troca": 0.0,
-    "historico": [],
-    "mensagens": [
+    "atual": _ATIVAS_INICIAIS[-1] if _ATIVAS_INICIAIS else None,
+    "pausado": bool(_ATIVAS_INICIAIS[-1].get("acompanhando")) if _ATIVAS_INICIAIS else False,
+    "ultima_troca": time.time() if _ATIVAS_INICIAIS else 0.0,
+    "historico": _HIST_INICIAL[-300:],
+    "mensagens": _MSGS_INICIAL or [
         {
             "origem": "CENTRAL",
             "hora": agora_br().strftime("%H:%M:%S"),
             "texto": "Monitoramento visual autonomo ativo."
         }
     ],
-    "retorno_bravo": [
+    "retorno_bravo": _RET_INICIAL or [
         {
             "hora": agora_br().strftime("%H:%M:%S"),
             "ocorrencia_id": "SISTEMA",
@@ -173,8 +266,26 @@ def _atualizar_ocorrencia_por_id(oc_id: str, fn):
     for o in STATE["historico"]:
         if o["id"] == oc_id:
             fn(o)
+            salvar_ocorrencia_db(o)
     if STATE["atual"] and STATE["atual"]["id"] == oc_id:
         fn(STATE["atual"])
+        salvar_ocorrencia_db(STATE["atual"])
+
+
+def _buscar_ocorrencia(oc_id: str):
+    if STATE["atual"] and STATE["atual"].get("id") == oc_id:
+        return STATE["atual"]
+    for o in reversed(STATE["historico"]):
+        if o.get("id") == oc_id:
+            return o
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute("SELECT dados_json FROM ocorrencias WHERE id = ?", (oc_id,)).fetchone()
+            if row:
+                return json.loads(row[0])
+    except Exception:
+        pass
+    return STATE["atual"]
 
 
 def inspecionar_imagem(caminho: Path):
@@ -693,18 +804,20 @@ def _registrar_ocorrencia(arq: Path, indice_zero: int, total: int, analise: dict
         "aviso_solucao": "",
         "unidade_bravo": "",
         "retorno_bravo": "",
+        "codigo_sessao": uuid.uuid4().hex[:8].upper(),
         **analise
     }
     STATE["atual"] = oc
     STATE["ultima_troca"] = time.time()
     STATE["historico"].append(oc)
     STATE["historico"] = STATE["historico"][-300:]
-    STATE["mensagens"].append({
-        "origem": "CENTRAL",
-        "hora": agora.strftime("%H:%M:%S"),
-        "texto": f"[{oc['id']}] {oc['nivel']} — {endereco} — {oc['sintese_operacional']}"
-    })
+    salvar_ocorrencia_db(oc)
+
+    hora_msg = agora.strftime("%H:%M:%S")
+    txt_msg = f"[{oc['id']}] {oc['nivel']} — {endereco} — {oc['sintese_operacional']}"
+    STATE["mensagens"].append({"origem": "CENTRAL", "hora": hora_msg, "texto": txt_msg})
     STATE["mensagens"] = STATE["mensagens"][-150:]
+    salvar_mensagem_db("CENTRAL", hora_msg, txt_msg)
     return oc
 
 
@@ -758,6 +871,7 @@ async def _monitorar_solucao_ate_aviso(oc_id: str, unidade: str, endereco: str):
         txt_etapa = f"Unidade {unidade} em deslocamento{loc_txt}."
         STATE["retorno_bravo"].append({"hora": hora_etapa, "ocorrencia_id": oc_id, "texto": txt_etapa})
         STATE["retorno_bravo"] = STATE["retorno_bravo"][-30:]
+        salvar_retorno_db(hora_etapa, oc_id, txt_etapa)
         _atualizar_ocorrencia_por_id(oc_id, lambda o: o.update({
             "retorno_bravo": f"[{hora_etapa}] {txt_etapa}",
             "solucao_pronta": False,
@@ -774,6 +888,7 @@ async def _monitorar_solucao_ate_aviso(oc_id: str, unidade: str, endereco: str):
         aviso_alfa = f"SOLUCAO INFORMADA POR {unidade} as {hora_sol}: Ocorrencia pronta para arquivamento pelo ALFA."
         STATE["retorno_bravo"].append({"hora": hora_sol, "ocorrencia_id": oc_id, "texto": txt_sol})
         STATE["retorno_bravo"] = STATE["retorno_bravo"][-30:]
+        salvar_retorno_db(hora_sol, oc_id, txt_sol)
         _atualizar_ocorrencia_por_id(oc_id, lambda o: o.update({
             "retorno_bravo": f"[{hora_sol}] {txt_sol}",
             "solucao_pronta": True,
@@ -781,6 +896,7 @@ async def _monitorar_solucao_ate_aviso(oc_id: str, unidade: str, endereco: str):
         }))
         STATE["mensagens"].append({"origem": unidade, "hora": hora_sol, "texto": aviso_alfa})
         STATE["mensagens"] = STATE["mensagens"][-150:]
+        salvar_mensagem_db(unidade, hora_sol, aviso_alfa)
     except asyncio.CancelledError:
         pass
 
@@ -812,6 +928,7 @@ async def simular_retorno_bravo_demo(oc_id: str, unidade: str = "BRAVO", enderec
     txt = random.choice(relatos)
     STATE["retorno_bravo"].append({"hora": hora, "ocorrencia_id": oc_id, "texto": txt})
     STATE["retorno_bravo"] = STATE["retorno_bravo"][-30:]
+    salvar_retorno_db(hora, oc_id, txt)
     _atualizar_ocorrencia_por_id(oc_id, lambda o: o.update({"retorno_bravo": f"[{hora}] {txt}"}))
 
 
@@ -838,8 +955,8 @@ async def on_startup():
 
 
 @app.get("/imagem")
-async def get_imagem():
-    oc = STATE["atual"]
+async def get_imagem(oc_id: str = ""):
+    oc = _buscar_ocorrencia(oc_id) if oc_id else STATE["atual"]
     if oc and Path(oc["caminho"]).exists():
         caminho = Path(oc["caminho"])
         if oc.get("caixa_arma"):
@@ -858,6 +975,97 @@ async def get_imagem():
     return JSONResponse({"erro": "Sem imagem"}, status_code=404)
 
 
+@app.get("/api/relatorio-bo")
+async def api_relatorio_bo(oc_id: str = ""):
+    oc = _buscar_ocorrencia(oc_id) if oc_id else STATE["atual"]
+    if not oc:
+        return HTMLResponse("<h2>Nenhuma ocorrencia disponivel para emissao de relatorio.</h2>", status_code=404)
+
+    emissao = agora_br().strftime("%d/%m/%Y %H:%M:%S")
+    objs = ", ".join(
+        f"{x.get('rotulo', '')}{(' (' + x.get('detalhe') + ')') if x.get('detalhe') else ''}"
+        for x in (oc.get("objetos") or []) if x.get("rotulo")
+    ) or "Nenhum item relevante"
+    pontos = " | ".join(oc.get("pontos_atencao") or []) or "Sem pontos adicionais"
+    img_url = f"/imagem?oc_id={oc.get('id', '')}"
+
+    def h(v):
+        return (
+            str(v or "")
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+        )
+
+    html_bo = f"""<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>RELATORIO TECNICO DE OCORRENCIA - {h(oc.get('id'))}</title>
+<style>
+  body{{font-family:Arial,Helvetica,sans-serif;color:#111827;margin:24px;line-height:1.45;font-size:13px}}
+  .topo{{border-bottom:2px solid #1e3a8a;padding-bottom:10px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:flex-end}}
+  .topo h1{{margin:0;font-size:18px;color:#0f172a}}
+  .sub{{font-size:11px;color:#475569}}
+  .sec{{border:1px solid #cbd5e1;border-radius:6px;padding:12px;margin-bottom:12px}}
+  .sec h2{{margin:0 0 8px 0;font-size:13px;color:#1e3a8a;border-bottom:1px solid #e2e8f0;padding-bottom:4px}}
+  .grid{{display:grid;grid-template-columns:1fr 1fr;gap:8px}}
+  .campo b{{color:#0f172a}}
+  .foto-bo{{max-width:100%;max-height:280px;border:1px solid #94a3b8;border-radius:4px;display:block;margin-top:6px}}
+  .acoes{{margin-bottom:14px}}
+  .btn-print{{background:#1d4ed8;color:#fff;border:none;padding:9px 14px;border-radius:6px;font-weight:bold;cursor:pointer;font-size:13px}}
+  @media print{{.acoes{{display:none}} body{{margin:10px}}}}
+</style>
+</head>
+<body>
+  <div class="acoes">
+    <button class="btn-print" onclick="window.print()">SALVAR EM PDF / IMPRIMIR COMPROVANTE</button>
+  </div>
+  <div class="topo">
+    <div>
+      <h1>RELATORIO TECNICO OPERACIONAL (BO / AUDITORIA)</h1>
+      <div class="sub">Registro oficial emitido pelo Painel de Monitoramento Operacional</div>
+    </div>
+    <div style="text-align:right;font-size:11px">
+      <b>Protocolo:</b> {h(oc.get('id'))}<br>
+      <b>Emitido em:</b> {h(emissao)}
+    </div>
+  </div>
+  <div class="sec">
+    <h2>1. IDENTIFICACAO E LOCALIZACAO</h2>
+    <div class="grid">
+      <div class="campo"><b>Data/Hora do Registro:</b> {h(oc.get('data_hora'))}</div>
+      <div class="campo"><b>Situacao Atual:</b> {h(oc.get('situacao_fluxo'))}</div>
+      <div class="campo"><b>Nivel de Risco:</b> {h(oc.get('nivel'))}</div>
+      <div class="campo"><b>Classificacao:</b> {h(oc.get('status'))}</div>
+      <div class="campo" style="grid-column:1/-1"><b>Endereco / Local:</b> {h(oc.get('endereco'))}</div>
+    </div>
+  </div>
+  <div class="sec">
+    <h2>2. EVIDENCIA VISUAL REGISTRADA</h2>
+    <img class="foto-bo" src="{h(img_url)}" alt="Evidencia visual">
+    <div class="campo" style="margin-top:6px"><b>Arquivo de Referencia:</b> {h(oc.get('arquivo'))} | <b>Pessoas Visiveis:</b> {h(oc.get('pessoas_visiveis', 0))}</div>
+  </div>
+  <div class="sec">
+    <h2>3. ANALISE SITUACIONAL</h2>
+    <div class="campo"><b>Sintese Operacional (ALFA):</b> {h(oc.get('sintese_operacional'))}</div>
+    <div class="campo" style="margin-top:6px"><b>Elementos Identificados:</b> {h(objs)}</div>
+    <div class="campo" style="margin-top:6px"><b>Relato Objetivo:</b> {h(oc.get('relato_visual'))}</div>
+    <div class="campo" style="margin-top:6px"><b>Pontos de Atencao:</b> {h(pontos)}</div>
+    <div class="campo" style="margin-top:6px"><b>Condicao do Local:</b> {h(oc.get('detalhes_cena'))}</div>
+  </div>
+  <div class="sec">
+    <h2>4. DESPACHO E DESFECHO OPERACIONAL</h2>
+    <div class="campo"><b>Despacho de Unidade:</b> {h(oc.get('unidade_bravo') or 'Nao despachado')}</div>
+    <div class="campo" style="margin-top:6px"><b>Retorno da Equipe:</b> {h(oc.get('retorno_bravo') or 'Sem retorno registrado')}</div>
+    <div class="campo" style="margin-top:6px"><b>Status de Solucao:</b> {h(oc.get('aviso_solucao') or ('Solucao confirmada' if oc.get('solucao_pronta') else 'Em andamento / Aguardando'))}</div>
+  </div>
+</body>
+</html>"""
+    return HTMLResponse(content=html_bo)
+
+
 @app.get("/api/estado")
 async def api_estado():
     restante = max(0, int(INTERVALO_SEG - (time.time() - STATE["ultima_troca"]))) if not STATE["pausado"] else int(INTERVALO_SEG)
@@ -867,6 +1075,7 @@ async def api_estado():
         "restante": restante,
         "pausado": STATE["pausado"],
         "modo_demo_retorno": MODO_DEMO_RETORNO_BRAVO,
+        "total_persistido": len(STATE["historico"]),
         "atual": STATE["atual"],
         "mensagens": STATE["mensagens"][-40:],
         "retorno_bravo": STATE["retorno_bravo"][-30:]
@@ -887,8 +1096,10 @@ async def enviar_bravo(req: Request):
         "solucao_pronta": False,
         "aviso_solucao": ""
     }))
-    STATE["mensagens"].append({"origem": f"ALFA -> {unidade}", "hora": hora, "texto": f"Ocorrencia {oc_id} enviada para {unidade} ({endereco})."})
+    txt_m = f"Ocorrencia {oc_id} enviada para {unidade} ({endereco})."
+    STATE["mensagens"].append({"origem": f"ALFA -> {unidade}", "hora": hora, "texto": txt_m})
     STATE["mensagens"] = STATE["mensagens"][-150:]
+    salvar_mensagem_db(f"ALFA -> {unidade}", hora, txt_m)
     if MODO_DEMO_RETORNO_BRAVO:
         asyncio.create_task(simular_retorno_bravo_demo(oc_id, unidade, endereco))
     return {"ok": True, "unidade": unidade, "endereco": endereco, "envio": envio_txt}
@@ -928,12 +1139,10 @@ async def acompanhar_ocorrencia(req: Request):
         }))
         STATE["pausado"] = False
         STATE["ultima_troca"] = time.time()
-    STATE["mensagens"].append({
-        "origem": "ALFA",
-        "hora": hora,
-        "texto": f"Ocorrencia {oc_id} {'em acompanhamento ate a solucao' if acompanhando else 'liberada do acompanhamento'}."
-    })
+    txt_m = f"Ocorrencia {oc_id} {'em acompanhamento ate a solucao' if acompanhando else 'liberada do acompanhamento'}."
+    STATE["mensagens"].append({"origem": "ALFA", "hora": hora, "texto": txt_m})
     STATE["mensagens"] = STATE["mensagens"][-150:]
+    salvar_mensagem_db("ALFA", hora, txt_m)
     return {"ok": True, "acompanhando": acompanhando, "pausado": STATE["pausado"]}
 
 
@@ -953,6 +1162,7 @@ async def retorno_bravo(req: Request):
         hora = agora_br().strftime("%H:%M:%S")
         STATE["retorno_bravo"].append({"hora": hora, "ocorrencia_id": oc_id, "texto": texto})
         STATE["retorno_bravo"] = STATE["retorno_bravo"][-30:]
+        salvar_retorno_db(hora, oc_id, texto)
         aviso = f"SOLUCAO INFORMADA as {hora}: {texto} — Pronta para arquivamento pelo ALFA." if solucao else ""
         _atualizar_ocorrencia_por_id(oc_id, lambda o: o.update({
             "retorno_bravo": f"[{hora}] {texto}",
@@ -967,10 +1177,10 @@ async def arquivar(req: Request):
     dados = await req.json()
     oc_id = dados.get("id") or (STATE["atual"]["id"] if STATE["atual"] else "")
     _cancelar_monitoramento_solucao(oc_id)
-    for o in STATE["historico"]:
-        if o["id"] == oc_id:
-            o["situacao_fluxo"] = "ARQUIVADA"
-            o["acompanhando"] = False
+    _atualizar_ocorrencia_por_id(oc_id, lambda o: o.update({
+        "situacao_fluxo": "ARQUIVADA",
+        "acompanhando": False
+    }))
     STATE["pausado"] = False
     STATE["atual"] = None
     await avancar_ciclo()
@@ -998,6 +1208,7 @@ async def desarquivar_periodo(req: Request):
                 dentro = False
             if dentro:
                 o["situacao_fluxo"] = "ATIVA"
+                salvar_ocorrencia_db(o)
                 qtd += 1
     ativas_restantes = [o for o in STATE["historico"] if o.get("situacao_fluxo") != "ARQUIVADA"]
     if ativas_restantes and (STATE["atual"] is None or STATE["atual"].get("situacao_fluxo") == "ARQUIVADA"):
@@ -1014,6 +1225,8 @@ async def mensagem(req: Request):
         STATE["mensagens"].append({"origem": "ALFA", "hora": hora, "texto": texto})
         STATE["mensagens"].append({"origem": "CENTRAL", "hora": hora, "texto": f"Registrado: '{texto}'."})
         STATE["mensagens"] = STATE["mensagens"][-150:]
+        salvar_mensagem_db("ALFA", hora, texto)
+        salvar_mensagem_db("CENTRAL", hora, f"Registrado: '{texto}'.")
     return {"ok": True}
 
 
@@ -1048,7 +1261,7 @@ img.foto{max-width:100%;width:auto;max-height:310px;border-radius:6px;display:bl
 .solucao-bar{margin-top:8px;padding:10px 12px;border-radius:6px;background:#1e3a8a;border:2px solid #60a5fa;color:#eff6ff;font-size:13px;font-weight:700;line-height:1.35;overflow-wrap:anywhere}
 .botoes{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center;max-width:100%}
 button{padding:7px 11px;border:none;border-radius:6px;cursor:pointer;font-weight:600;color:#fff;font-size:12px;max-width:100%}
-.b-bravo{background:#dc2626}.b-arq{background:#2563eb}.b-desarq{background:#059669}.b-prev{background:#334155}.b-acomp{background:#d97706}.b-acomp-ativo{background:#047857}
+.b-bravo{background:#dc2626}.b-arq{background:#2563eb}.b-desarq{background:#059669}.b-prev{background:#334155}.b-acomp{background:#d97706}.b-acomp-ativo{background:#047857}.b-bo{background:#4f46e5}
 select,input{background:#0b101b;color:#fff;border:1px solid #334155;border-radius:6px;padding:6px 8px;font-size:12px;min-width:0;max-width:100%}
 .box{background:#0b101b;border:1px solid #1e293b;border-radius:6px;padding:8px;max-height:260px;overflow-y:auto;overflow-x:hidden;font-size:12px;overflow-wrap:anywhere;word-break:break-word;max-width:100%}
 .linha-rel{margin-top:5px;line-height:1.4}
@@ -1059,7 +1272,7 @@ select,input{background:#0b101b;color:#fff;border:1px solid #334155;border-radiu
 </head>
 <body>
 <header>
-  <div><b>PAINEL OPERACIONAL</b> | Ciclo: <span id="ciclo">02:00</span></div>
+  <div><b>PAINEL OPERACIONAL</b> | Ciclo: <span id="ciclo">02:00</span> | Banco: <span id="dbCount">0</span></div>
   <div class="relogio" id="relogio">--/--/---- --:--:--</div>
 </header>
 <div class="wrap">
@@ -1085,6 +1298,7 @@ select,input{background:#0b101b;color:#fff;border:1px solid #334155;border-radiu
       <button id="btnAcompanhar" class="b-acomp" onclick="acompanharOcorrencia()">ACOMPANHAR OCORRENCIA</button>
       <button class="b-arq" onclick="arquivarAtual()">ARQUIVAR OCORRENCIA</button>
       <button class="b-prev" onclick="ocorrenciaAnterior()">OCORRENCIA ANTERIOR</button>
+      <button class="b-bo" onclick="gerarRelatorioBO()">GERAR RELATORIO BO / PDF</button>
     </div>
   </div>
   <div class="card">
@@ -1104,6 +1318,16 @@ select,input{background:#0b101b;color:#fff;border:1px solid #334155;border-radiu
 <script>
 function esc(s){
   return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+function sincronizarLinkApresentacao(a){
+  if(!a || !a.id) return;
+  const tag = a.id + "-" + (a.codigo_sessao || "LIVE");
+  const params = new URLSearchParams(window.location.search);
+  if(params.get("oc") !== tag){
+    params.set("oc", tag);
+    const novaUrl = window.location.pathname + "?" + params.toString();
+    window.history.replaceState(null, "", novaUrl);
+  }
 }
 async function enviarBravo(){
   const id = window._atualId || "";
@@ -1126,6 +1350,10 @@ async function ocorrenciaAnterior(){
   await fetch("/api/ocorrencia-anterior",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({})});
   await atualizar();
 }
+function gerarRelatorioBO(){
+  const id = window._atualId || "";
+  window.open("/api/relatorio-bo?oc_id=" + encodeURIComponent(id), "_blank");
+}
 async function desarquivar(){
   const inicio = document.getElementById("dtIni").value;
   const fim = document.getElementById("dtFim").value;
@@ -1144,6 +1372,7 @@ async function atualizar(){
   const d = await r.json();
   document.getElementById("relogio").textContent = d.agora;
   document.getElementById("ciclo").textContent = fmtSeg(d.restante) + (d.pausado ? " [PAUSADO]" : "");
+  document.getElementById("dbCount").textContent = d.total_persistido ?? 0;
   const a = d.atual;
   const badgeEnv = document.getElementById("statusEnvio");
   const endBox = document.getElementById("enderecoBox");
@@ -1153,6 +1382,7 @@ async function atualizar(){
   const btnAcomp = document.getElementById("btnAcompanhar");
   if(a){
     window._atualId = a.id;
+    sincronizarLinkApresentacao(a);
     const acompAtivo = Boolean(a.acompanhando);
     btnAcomp.textContent = acompAtivo ? "ACOMPANHANDO OCORRENCIA" : "ACOMPANHAR OCORRENCIA";
     btnAcomp.className = acompAtivo ? "b-acomp-ativo" : "b-acomp";
