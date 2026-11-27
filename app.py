@@ -799,6 +799,7 @@ def _registrar_ocorrencia(arq: Path, indice_zero: int, total: int, analise: dict
         "arquivo": arq.name,
         "caminho": str(arq),
         "situacao_fluxo": "ATIVA",
+        "etapa_retorno": 0,
         "acompanhando": False,
         "solucao_pronta": False,
         "aviso_solucao": "",
@@ -874,6 +875,20 @@ async def _monitorar_solucao_ate_aviso(oc_id: str, unidade: str, endereco: str):
         salvar_retorno_db(hora_etapa, oc_id, txt_etapa)
         _atualizar_ocorrencia_por_id(oc_id, lambda o: o.update({
             "retorno_bravo": f"[{hora_etapa}] {txt_etapa}",
+            "etapa_retorno": 1,
+            "solucao_pronta": False,
+            "aviso_solucao": ""
+        }))
+
+        await asyncio.sleep(5)
+        hora_med = agora_br().strftime("%H:%M:%S")
+        txt_med = f"Unidade {unidade} no local{loc_txt}; averiguacao em andamento."
+        STATE["retorno_bravo"].append({"hora": hora_med, "ocorrencia_id": oc_id, "texto": txt_med})
+        STATE["retorno_bravo"] = STATE["retorno_bravo"][-30:]
+        salvar_retorno_db(hora_med, oc_id, txt_med)
+        _atualizar_ocorrencia_por_id(oc_id, lambda o: o.update({
+            "retorno_bravo": f"[{hora_med}] {txt_med}",
+            "etapa_retorno": 2,
             "solucao_pronta": False,
             "aviso_solucao": ""
         }))
@@ -891,6 +906,7 @@ async def _monitorar_solucao_ate_aviso(oc_id: str, unidade: str, endereco: str):
         salvar_retorno_db(hora_sol, oc_id, txt_sol)
         _atualizar_ocorrencia_por_id(oc_id, lambda o: o.update({
             "retorno_bravo": f"[{hora_sol}] {txt_sol}",
+            "etapa_retorno": 4,
             "solucao_pronta": True,
             "aviso_solucao": aviso_alfa
         }))
@@ -921,15 +937,18 @@ async def simular_retorno_bravo_demo(oc_id: str, unidade: str = "BRAVO", enderec
     hora = agora_br().strftime("%H:%M:%S")
     loc_txt = f" em {endereco}" if endereco else ""
     relatos = [
-        f"Unidade {unidade} em deslocamento{loc_txt}.",
-        f"Unidade {unidade} no local{loc_txt}; averiguacao em andamento.",
-        f"Unidade {unidade} concluiu a averiguacao inicial{loc_txt} e aguarda orientacao do ALFA."
+        (1, f"Unidade {unidade} em deslocamento{loc_txt}."),
+        (2, f"Unidade {unidade} no local{loc_txt}; averiguacao em andamento."),
+        (2, f"Unidade {unidade} concluiu a averiguacao inicial{loc_txt} e aguarda orientacao do ALFA.")
     ]
-    txt = random.choice(relatos)
+    etapa_sorteada, txt = random.choice(relatos)
     STATE["retorno_bravo"].append({"hora": hora, "ocorrencia_id": oc_id, "texto": txt})
     STATE["retorno_bravo"] = STATE["retorno_bravo"][-30:]
     salvar_retorno_db(hora, oc_id, txt)
-    _atualizar_ocorrencia_por_id(oc_id, lambda o: o.update({"retorno_bravo": f"[{hora}] {txt}"}))
+    _atualizar_ocorrencia_por_id(oc_id, lambda o: o.update({
+        "retorno_bravo": f"[{hora}] {txt}",
+        "etapa_retorno": max(int(o.get("etapa_retorno") or 0), etapa_sorteada) if not o.get("solucao_pronta") else 4
+    }))
 
 
 async def loop_autonomo():
@@ -1093,6 +1112,7 @@ async def enviar_bravo(req: Request):
     _atualizar_ocorrencia_por_id(oc_id, lambda o: o.update({
         "situacao_fluxo": f"ENVIADO ({unidade})",
         "unidade_bravo": envio_txt,
+        "etapa_retorno": 1 if not o.get("solucao_pronta") else 4,
         "solucao_pronta": False,
         "aviso_solucao": ""
     }))
@@ -1123,6 +1143,7 @@ async def acompanhar_ocorrencia(req: Request):
         _atualizar_ocorrencia_por_id(oc_id, lambda o: o.update({
             "acompanhando": True,
             "situacao_fluxo": "EM ACOMPANHAMENTO",
+            "etapa_retorno": 3 if not o.get("solucao_pronta") else 4,
             "solucao_pronta": False,
             "aviso_solucao": ""
         }))
@@ -1134,6 +1155,7 @@ async def acompanhar_ocorrencia(req: Request):
         _atualizar_ocorrencia_por_id(oc_id, lambda o: o.update({
             "acompanhando": False,
             "situacao_fluxo": "ATIVA",
+            "etapa_retorno": 0,
             "solucao_pronta": False,
             "aviso_solucao": ""
         }))
@@ -1164,8 +1186,10 @@ async def retorno_bravo(req: Request):
         STATE["retorno_bravo"] = STATE["retorno_bravo"][-30:]
         salvar_retorno_db(hora, oc_id, texto)
         aviso = f"SOLUCAO INFORMADA as {hora}: {texto} — Pronta para arquivamento pelo ALFA." if solucao else ""
+        etapa_novo = 4 if solucao else (2 if re.search(r"(?i)\b(local|averigu|aguarda)\b", texto) else 1)
         _atualizar_ocorrencia_por_id(oc_id, lambda o: o.update({
             "retorno_bravo": f"[{hora}] {texto}",
+            "etapa_retorno": 4 if (solucao or bool(o.get("solucao_pronta"))) else max(int(o.get("etapa_retorno") or 0), etapa_novo),
             "solucao_pronta": solucao or bool(o.get("solucao_pronta")),
             "aviso_solucao": aviso or o.get("aviso_solucao", "")
         }))
@@ -1258,7 +1282,7 @@ header>div{min-width:0;max-width:100%;overflow-wrap:anywhere}
 img.foto{max-width:100%;width:auto;max-height:310px;border-radius:6px;display:block;margin:0;background:#000}
 .endereco-bar{margin-top:8px;padding:7px 10px;border-radius:6px;background:#0f172a;border:1px solid #1e3a8a;color:#bae6fd;font-size:12px;overflow-wrap:anywhere}
 .acomp-bar{margin-top:8px;padding:8px 10px;border-radius:6px;background:#064e3b;border:1px solid #34d399;color:#d1fae5;font-size:12px;font-weight:700;overflow-wrap:anywhere}
-.solucao-bar{margin-top:8px;padding:10px 12px;border-radius:6px;background:#1e3a8a;border:2px solid #60a5fa;color:#eff6ff;font-size:13px;font-weight:700;line-height:1.35;overflow-wrap:anywhere}
+.solucao-bar{margin-top:8px;padding:11px 13px;border-radius:6px;background:#14532d;border:2px solid #ffffff;color:#ffffff;font-size:13px;font-weight:800;line-height:1.4;overflow-wrap:anywhere}
 .botoes{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center;max-width:100%}
 button{padding:7px 11px;border:none;border-radius:6px;cursor:pointer;font-weight:600;color:#fff;font-size:12px;max-width:100%}
 .b-bravo{background:#dc2626}.b-arq{background:#2563eb}.b-desarq{background:#059669}.b-prev{background:#334155}.b-acomp{background:#d97706}.b-acomp-ativo{background:#047857}.b-bo{background:#4f46e5}
@@ -1268,6 +1292,15 @@ select,input{background:#0b101b;color:#fff;border:1px solid #334155;border-radiu
 .crit{color:#fca5a5}.med{color:#fcd34d}.seg{color:#86efac}
 .envio-ok{margin-top:8px;padding:7px 10px;border-radius:6px;background:#064e3b;border:1px solid #10b981;color:#a7f3d0;font-size:12px;font-weight:700}
 .retorno-destaque{margin-top:8px;padding:10px 12px;border-radius:6px;background:#451a03;border:2px solid #f59e0b;color:#fde68a;font-size:13px;font-weight:700;line-height:1.35;overflow-wrap:anywhere}
+.ret-e1{background:#172554;border-color:#60a5fa;color:#dbeafe}
+.ret-e2{background:#451a03;border-color:#f59e0b;color:#fde68a}
+.ret-e3{background:#3b0764;border-color:#c084fc;color:#f3e8ff}
+.ret-e4{background:#14532d;border-color:#ffffff;color:#ffffff}
+.selo-etapa{display:inline-block;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:800;letter-spacing:0.3px;margin-right:6px;vertical-align:middle}
+.selo-e1{background:#1d4ed8;color:#ffffff}
+.selo-e2{background:#d97706;color:#ffffff}
+.selo-e3{background:#7e22ce;color:#ffffff}
+.selo-e4{background:#ffffff;color:#052e16}
 </style>
 </head>
 <body>
@@ -1328,6 +1361,17 @@ function sincronizarLinkApresentacao(a){
     const novaUrl = window.location.pathname + "?" + params.toString();
     window.history.replaceState(null, "", novaUrl);
   }
+}
+function obterEtapaRetorno(a){
+  if(a.solucao_pronta) return 4;
+  const et = Number(a.etapa_retorno || 0);
+  if(et >= 1 && et <= 4) return et;
+  if(a.acompanhando) return 3;
+  const txt = String(a.retorno_bravo || "").toLowerCase();
+  if(txt.includes("solucionad") || txt.includes("concluid") || txt.includes("encerrou o atendimento")) return 4;
+  if(txt.includes("no local") || txt.includes("averiguacao") || txt.includes("averiguacao inicial")) return 2;
+  if(txt.includes("deslocamento") || a.unidade_bravo) return 1;
+  return 2;
 }
 async function enviarBravo(){
   const id = window._atualId || "";
@@ -1412,15 +1456,26 @@ async function atualizar(){
       badgeEnv.textContent = "";
     }
     if(a.retorno_bravo){
+      const etapa = obterEtapaRetorno(a);
+      const rotuloEtapa =
+        etapa === 1 ? "ETAPA 1/4: DESLOCAMENTO" :
+        etapa === 2 ? "ETAPA 2/4: AVERIGUACAO" :
+        etapa === 3 ? "ETAPA 3/4: ACOMPANHAMENTO" :
+        "ETAPA 4/4: SOLUÇÃO PRONTA";
+      retBox.className = "retorno-destaque ret-e" + etapa;
       retBox.style.display = "block";
-      retBox.innerHTML = "RETORNO DO BRAVO: " + esc(a.retorno_bravo);
+      retBox.innerHTML =
+        "<span class='selo-etapa selo-e" + etapa + "'>" + esc(rotuloEtapa) + "</span> " +
+        "RETORNO DO BRAVO: " + esc(a.retorno_bravo);
     } else {
       retBox.style.display = "none";
       retBox.innerHTML = "";
     }
     if(a.solucao_pronta && a.aviso_solucao){
       solBox.style.display = "block";
-      solBox.textContent = "AVISO AO ALFA: " + a.aviso_solucao;
+      solBox.innerHTML =
+        "<span class='selo-etapa selo-e4'>ETAPA 4/4: SOLUÇÃO PRONTA</span> " +
+        "AVISO AO ALFA: " + esc(a.aviso_solucao);
     } else {
       solBox.style.display = "none";
       solBox.textContent = "";
